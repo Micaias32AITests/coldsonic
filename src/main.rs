@@ -1,11 +1,12 @@
+use async_compat::Compat;
 use iced::{
     Alignment::Center,
     Element,
     Length::Fill,
     Task, application,
-    widget::{button, column, container, text, text_input},
+    widget::{Column, button, column, container, scrollable, text, text_input},
 };
-use opensubsonic::{Auth, Client};
+use opensubsonic::{Auth, Client, data::ArtistId3};
 
 fn main() -> anyhow::Result<()> {
     application(State::init, State::update, State::view).run()?;
@@ -21,6 +22,7 @@ pub enum State {
     },
     LoggedIn {
         client: Client,
+        artists: Vec<ArtistId3>,
     },
 }
 
@@ -78,8 +80,37 @@ impl State {
                 }
             }
             Msg::LoginSucessful(client) => {
-                *self = State::LoggedIn { client };
+                let client_for_load = client.clone();
+                *self = State::LoggedIn {
+                    client,
+                    artists: Vec::new(),
+                };
+                return Task::perform(
+                    Compat::new(async move { client_for_load.get_artists(None).await }),
+                    |res| match res {
+                        Ok(artists) => Msg::ArtistsLoaded(
+                            artists
+                                .index
+                                .into_iter()
+                                .flat_map(|index| index.artist)
+                                .collect(),
+                        ),
+                        Err(_) => Msg::ArtistsLoadFailed,
+                    },
+                );
             }
+            Msg::ArtistsLoaded(artists) => {
+                if let Self::LoggedIn {
+                    artists: current, ..
+                } = self
+                {
+                    *current = artists;
+                }
+            }
+            Msg::ArtistsLoadFailed => {
+                eprintln!("FUCK");
+            }
+            Msg::ArtistClicked(_) => {}
             Msg::LoginFailed => {
                 eprintln!("FUCK");
             }
@@ -107,7 +138,20 @@ impl State {
             )
             .center(Fill)
             .into(),
-            Self::LoggedIn { client: _ } => text("logged in").into(),
+            Self::LoggedIn { client: _, artists } => {
+                if artists.is_empty() {
+                    return text("loading...").into();
+                }
+                let list = Column::with_children(artists.iter().map(|artist| {
+                    button(text(artist.name.clone()))
+                        .width(Fill)
+                        .on_press(Msg::ArtistClicked(artist.id.clone()))
+                        .into()
+                }))
+                .spacing(4)
+                .padding(8);
+                scrollable(list).width(Fill).height(Fill).into()
+            }
         }
     }
 }
@@ -120,4 +164,7 @@ pub enum Msg {
     AttemptLogin,
     LoginSucessful(Client),
     LoginFailed,
+    ArtistsLoaded(Vec<ArtistId3>),
+    ArtistsLoadFailed,
+    ArtistClicked(String),
 }

@@ -6,7 +6,8 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 async-compat = "0.2.6"
-iced = { version = "0.14.0", features = ["smol"] }
+iced = { version = "0.14.0", features = ["smol", "image"] }
+iced_fonts = { version = "0.3", features = ["lucide"] }
 itertools = "0.15.0"
 opensubsonic = "0.4.0"
 reqwest = "0.13.5"

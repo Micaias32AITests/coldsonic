@@ -9,6 +9,7 @@ pub mod login;
 
 #[derive(Debug, Clone)]
 pub struct MainScreen {
+    #[allow(dead_code)]
     client: Arc<Client>,
     current_screen: SubScreen,
     now_playing: Option<SongPlaying>,

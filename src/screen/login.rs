@@ -1,3 +1,4 @@
+use async_compat::Compat;
 use iced::{
     Alignment::Center,
     Length::Fill,
@@ -6,13 +7,14 @@ use iced::{
 };
 use opensubsonic::{Auth, Client};
 
-use crate::{Action, Screen};
+use crate::{Action, Screen, config::Credentials};
 
 #[derive(Debug, Clone)]
 pub struct State {
     url_field: String,
     user_field: String,
     password_field: String,
+    logging_in: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -25,25 +27,66 @@ pub enum Msg {
     LoginFailed,
 }
 
+fn login_task(url: String, username: String, password: String) -> Action<Msg, Client> {
+    Action::task(Task::perform(
+        async move {
+            let client = match Client::new(
+                &url,
+                Auth::Token {
+                    username,
+                    password,
+                },
+            ) {
+                Ok(client) => client,
+                Err(_) => return Err(()),
+            };
+            match Compat::new(client.ping()).await {
+                Ok(()) => Ok(client),
+                Err(_e) => Err(()),
+            }
+        },
+        |res| match res {
+            Ok(client) => Msg::LoginSucessful(client),
+            Err(_e) => Msg::LoginFailed,
+        },
+    ))
+}
+
 impl Screen for State {
     type Msg = Msg;
 
     type Emit = Client;
 
-    type InitData = ();
+    type InitData = Option<Credentials>;
 
-    fn init((): Self::InitData) -> (Self, Action<Self::Msg, Self::Emit>)
+    fn init(data: Self::InitData) -> (Self, Action<Self::Msg, Self::Emit>)
     where
         Self: Sized,
     {
-        (
-            Self {
-                url_field: String::new(),
-                user_field: String::new(),
-                password_field: String::new(),
-            },
-            Action::none(),
-        )
+        match data {
+            Some(Credentials {
+                url,
+                username,
+                password,
+            }) => (
+                Self {
+                    url_field: url.clone(),
+                    user_field: username.clone(),
+                    password_field: password.clone(),
+                    logging_in: true,
+                },
+                login_task(url, username, password),
+            ),
+            None => (
+                Self {
+                    url_field: String::new(),
+                    user_field: String::new(),
+                    password_field: String::new(),
+                    logging_in: false,
+                },
+                Action::none(),
+            ),
+        }
     }
 
     fn update(&mut self, msg: Self::Msg) -> Action<Self::Msg, Self::Emit> {
@@ -56,26 +99,15 @@ impl Screen for State {
                     url_field,
                     user_field,
                     password_field,
+                    ..
                 } = self.clone();
-                return Action::task(Task::perform(
-                    async move {
-                        Client::new(
-                            &url_field,
-                            Auth::Token {
-                                username: user_field,
-                                password: password_field,
-                            },
-                        )
-                    },
-                    |res| match res {
-                        Ok(client) => Msg::LoginSucessful(client),
-                        Err(_e) => Msg::LoginFailed,
-                    },
-                ));
+                self.logging_in = true;
+                return login_task(url_field, user_field, password_field);
             }
             Msg::LoginSucessful(client) => return Action::Emit(client),
             Msg::LoginFailed => {
-                eprintln!("FUCK");
+                self.logging_in = false;
+                eprintln!("[login] failed to log in");
             }
         }
         Action::none()
@@ -86,6 +118,7 @@ impl Screen for State {
             url_field,
             user_field,
             password_field,
+            logging_in,
         } = self;
         container(
             column![
@@ -94,7 +127,11 @@ impl Screen for State {
                 text_input("Password", password_field)
                     .secure(true)
                     .on_input(Msg::PasswordEdit),
-                button("Log In").on_press(Msg::AttemptLogin)
+                if *logging_in {
+                    button("Logging in…").on_press_maybe(None)
+                } else {
+                    button("Log In").on_press(Msg::AttemptLogin)
+                }
             ]
             .width(500.0)
             .align_x(Center),

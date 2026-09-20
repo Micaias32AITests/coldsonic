@@ -1,7 +1,7 @@
 use iced::{Element, Task, application};
 use opensubsonic::Client;
 
-use coldsonic::Screen;
+use coldsonic::{Screen, config};
 use coldsonic::screen;
 
 fn main() -> anyhow::Result<()> {
@@ -25,7 +25,7 @@ pub enum Msg {
 
 impl State {
     pub fn init() -> (Self, Task<Msg>) {
-        let (screen, action) = screen::login::State::init(());
+        let (screen, action) = screen::login::State::init(config::Credentials::load());
         let login_task = action.handle(Msg::ScreenLogin, |_| Task::none());
         let task = Task::batch(vec![
             login_task,

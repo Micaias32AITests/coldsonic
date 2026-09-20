@@ -48,10 +48,16 @@ pub enum Msg {
     PlayShuffled(String),
 }
 
+/// Events this screen raises to its parent (`MainScreen`, the coordinator).
+#[derive(Debug, Clone)]
+pub enum Event {
+    PlayShuffled(String /* artist id */),
+}
+
 impl Screen for State {
     type Msg = Msg;
 
-    type Emit = Never;
+    type Emit = Event;
 
     type InitData = Arc<Client>;
 
@@ -137,10 +143,7 @@ impl Screen for State {
                 };
                 Action::none()
             }
-            Msg::PlayShuffled(id) => {
-                println!("[artists] play shuffled: {id}");
-                Action::none()
-            }
+            Msg::PlayShuffled(id) => Action::emit(Event::PlayShuffled(id)),
         }
     }
 

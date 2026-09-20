@@ -716,6 +716,7 @@ dependencies = [
  "iced_fonts",
  "itertools 0.15.0",
  "opensubsonic",
+ "rand 0.9.5",
  "reqwest",
  "serde",
  "smol",

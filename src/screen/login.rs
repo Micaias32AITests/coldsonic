@@ -30,13 +30,7 @@ pub enum Msg {
 fn login_task(url: String, username: String, password: String) -> Action<Msg, Client> {
     Action::task(Task::perform(
         async move {
-            let client = match Client::new(
-                &url,
-                Auth::Token {
-                    username,
-                    password,
-                },
-            ) {
+            let client = match Client::new(&url, Auth::Token { username, password }) {
                 Ok(client) => client,
                 Err(_) => return Err(()),
             };

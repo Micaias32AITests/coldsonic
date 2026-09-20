@@ -1,6 +1,7 @@
 use iced::Subscription;
 
 pub mod config;
+pub mod engine;
 pub mod prelude;
 pub mod screen;
 

@@ -4,6 +4,7 @@
   inputs = {
     nixpkgs.url = "github:cachix/devenv-nixpkgs/rolling";
     devenv.url = "github:cachix/devenv";
+    crane.url = "github:ipetkov/crane";
   };
 
   nixConfig = {
@@ -15,6 +16,7 @@
     self,
     nixpkgs,
     devenv,
+    crane,
     ...
   } @ inputs: let
     systems = [
@@ -26,6 +28,7 @@
   in {
     packages = forAllSystems (system: let
       pkgs = nixpkgs.legacyPackages.${system};
+      craneLib = crane.mkLib pkgs;
       dlopenLibraries = with pkgs; [
         vulkan-loader
         libGL
@@ -36,25 +39,27 @@
         libxi
         libxrandr
       ];
-    in {
-      default = pkgs.rustPlatform.buildRustPackage {
+      commonArgs = {
         pname = cargoToml.package.name;
         version = cargoToml.package.version;
-        src = ./.;
-        cargoLock.lockFile = ./Cargo.lock;
-
+        src = craneLib.cleanCargoSource ./.;
         nativeBuildInputs = [pkgs.pkg-config];
         buildInputs =
           [pkgs.alsa-lib]
           ++ dlopenLibraries;
-
         env.RUSTFLAGS = "-C link-arg=-Wl,-rpath,${pkgs.lib.makeLibraryPath dlopenLibraries}";
         dontPatchELF = true;
-
-        meta = {
-          mainProgram = cargoToml.package.name;
-        };
       };
+      cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+    in {
+      default = craneLib.buildPackage (commonArgs
+        // {
+          inherit cargoArtifacts;
+
+          meta = {
+            mainProgram = cargoToml.package.name;
+          };
+        });
     });
 
     devShells = forAllSystems (system: let

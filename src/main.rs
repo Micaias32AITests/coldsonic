@@ -1,4 +1,4 @@
-use iced::{Element, Subscription, Task, application};
+use iced::{Element, Subscription, Task, Theme, application};
 use opensubsonic::Client;
 
 use coldsonic::screen;
@@ -7,6 +7,7 @@ use coldsonic::{Screen, config};
 fn main() -> anyhow::Result<()> {
     application(State::init, State::update, State::view)
         .subscription(State::subscription)
+        .theme(Theme::CatppuccinMocha)
         .run()?;
     Ok(())
 }

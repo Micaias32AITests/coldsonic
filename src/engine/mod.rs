@@ -29,6 +29,9 @@ pub enum EngineMsg {
     Enqueue(Track),
     /// Skip to the next queued track.
     Next,
+    /// Go back: restart the current track when it's past the threshold,
+    /// otherwise step back into the playback history.
+    Prev,
     Pause,
     Resume,
     Toggle,
@@ -51,6 +54,7 @@ pub enum EngineEvent {
     Paused,
     Resumed,
     Stopped,
+    SeekDone,
     UpdateNowPlaying,
     QueueChanged,
     Error(String),
@@ -71,6 +75,8 @@ pub struct NowPlaying {
     pub position: Duration,
     pub duration: Duration,
     pub state: PlaybackState,
+    /// 0.0–1.0. The engine owns volume; the UI only reads the snapshot.
+    pub volume: f32,
 }
 
 /// Errors surfaced by the engine.

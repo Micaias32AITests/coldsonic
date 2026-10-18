@@ -283,7 +283,7 @@ impl MainScreen {
             0.0
         })));
         let volume_slider = slider(0.0..=1.0, volume, |v| Msg::Engine(EngineMsg::SetVolume(v)))
-            .step(0.01)
+            .step(0.01_f32)
             .width(100);
         let right = row![mute_button, volume_slider].align_y(Center).spacing(8);
 

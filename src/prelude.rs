@@ -4,4 +4,6 @@ pub use iced::{Bottom, Center, Fill, FillPortion, Left, Right, Shrink, Top};
 
 pub use std::sync::Arc;
 
+pub use tracing::{debug, error, info, instrument, trace, warn};
+
 pub use crate::{Action, Never, Screen};

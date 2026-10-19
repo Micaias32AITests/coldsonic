@@ -20,6 +20,8 @@
     libxcursor
     libxi
     libxrandr
+    # rfd's xdg-desktop-portal backend dlopens libdbus-1.so
+    dbus
   ];
 in {
   # https://devenv.sh/basics/
@@ -32,6 +34,8 @@ in {
       # pkg-config finds ALSA (cpal, via rodio — see sound.md)
       pkgs.pkg-config
       pkgs.alsa-lib
+      # fallback folder picker when the portal is unreachable
+      pkgs.zenity
     ]
     ++ dlopenLibraries;
 

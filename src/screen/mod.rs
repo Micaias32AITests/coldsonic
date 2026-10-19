@@ -1,17 +1,16 @@
 use std::time::Duration;
 
-use async_compat::Compat;
 use bytes::Bytes;
 use iced::Subscription;
 use iced::futures::{SinkExt, Stream};
 use iced_fonts::lucide;
-use opensubsonic::Client;
 
 use crate::engine::{self, Engine, EngineEvent, EngineMsg};
+use crate::library::{ArtistId, CoverId, Manager};
 use crate::prelude::*;
 
 pub mod artists;
-pub mod login;
+pub mod library_setup;
 
 /// Engine tick period — fast enough to notice track-end within ~1/4 s and keep
 /// the bar smooth.
@@ -20,15 +19,13 @@ const TICK: Duration = Duration::from_millis(250);
 /// Logical cover size in the bar (mirrors `artists::COVER_DISPLAY`).
 const COVER_DISPLAY: f32 = 48.0;
 
-/// Pixel size requested from the server (2× the display size for HiDPI).
-///
-/// The server returns a downsized image, which keeps the download, decode and
-/// GPU upload small.
-const COVER_PX: i32 = 96;
+/// Pixel size requested from the library (2× the display size for HiDPI; the
+/// offline store returns art as stored, a networked provider downsizes).
+const COVER_PX: u32 = 96;
 
 #[derive(Debug, Clone)]
 pub struct MainScreen {
-    client: Arc<Client>,
+    manager: Arc<Manager>,
     current_screen: SubScreen,
     engine: Engine,
     /// Snapshot pushed by the engine; the bar renders from this.
@@ -57,8 +54,8 @@ pub enum Msg {
     EngineEvent(engine::EngineEvent),
     /// Produced by the 250 ms subscription; drives `engine.tick()`.
     Tick,
-    /// Track id + cover fetch result (mirrors `artists::Msg::CoverLoaded`).
-    CoverLoaded(String, Result<Bytes, ()>),
+    /// Cover fetch result for a cover id (mirrors `artists::Msg::CoverLoaded`).
+    CoverLoaded(CoverId, Result<Bytes, ()>),
     /// The seek slider moved while dragging — stores the draft position.
     SeekDragged(f32),
     /// The seek slider was released — commits the draft seek to the engine.
@@ -70,18 +67,18 @@ impl Screen for MainScreen {
 
     type Emit = Never;
 
-    type InitData = Client;
+    type InitData = Arc<Manager>;
 
     fn init(data: Self::InitData) -> (Self, Action<Self::Msg, Self::Emit>)
     where
         Self: Sized,
     {
-        let client: Arc<_> = data.into();
-        let (state, action) = artists::State::init(client.clone());
+        let manager = data;
+        let (state, action) = artists::State::init(manager.clone());
         let task = action.handle(Msg::ArtistsScreenMsg, |_event| Task::none());
         (
             Self {
-                client,
+                manager,
                 current_screen: SubScreen::Artists(state),
                 engine: Engine::mock(),
                 now_playing: None,
@@ -97,19 +94,15 @@ impl Screen for MainScreen {
         match msg {
             Msg::ArtistsScreenMsg(inner) => {
                 let SubScreen::Artists(screen) = &mut self.current_screen;
-                let client = self.client.clone();
+                let manager = self.manager.clone();
                 let task = screen
                     .update(inner)
                     .handle(Msg::ArtistsScreenMsg, move |event| match event {
                         artists::Event::PlayShuffled(id) => {
-                            let client = client.clone();
-                            Task::perform(Compat::new(collect_shuffled_songs(client, id)), |res| {
-                                match res {
-                                    Ok(tracks) => Msg::Engine(EngineMsg::PlayQueue(tracks)),
-                                    Err(err) => {
-                                        Msg::EngineEvent(EngineEvent::Error(err.to_string()))
-                                    }
-                                }
+                            let manager = manager.clone();
+                            Task::perform(collect_shuffled_songs(manager, id), |res| match res {
+                                Ok(tracks) => Msg::Engine(EngineMsg::PlayQueue(tracks)),
+                                Err(err) => Msg::EngineEvent(EngineEvent::Error(err.to_string())),
                             })
                         }
                     });
@@ -149,7 +142,7 @@ impl Screen for MainScreen {
                 let Some(np) = &self.now_playing else {
                     return Action::none();
                 };
-                if np.track.id != id {
+                if np.track.cover.as_ref() != Some(&id) {
                     return Action::none();
                 }
                 self.cover = match result {
@@ -299,21 +292,18 @@ impl MainScreen {
     /// bar. Returns any task the event spawns (e.g. a cover fetch — this is
     /// the "watch the events flow" verification of Facet 1).
     fn apply_engine_event(&mut self, event: EngineEvent) -> Action<Msg, Never> {
-        eprintln!("[engine] event: {event:?}");
+        debug!(?event, "engine event");
         let mut task = Task::none();
         match event {
             EngineEvent::PlaybackStarted(track) => {
                 self.cover = None;
                 self.seeking = None;
-                task = if track.cover_art.is_some() {
-                    let client = self.client.clone();
-                    let id = track.id.clone();
-                    let fetch_id = id.clone();
+                task = if let Some(cover) = track.cover.clone() {
+                    let manager = self.manager.clone();
+                    let fetch_cover = cover.clone();
                     Task::perform(
-                        Compat::new(async move {
-                            client.get_cover_art(&fetch_id, Some(COVER_PX)).await
-                        }),
-                        move |res| Msg::CoverLoaded(id, res.map_err(|_| ())),
+                        async move { manager.cover(&fetch_cover, COVER_PX).await },
+                        move |res| Msg::CoverLoaded(cover, res.map_err(|_| ())),
                     )
                 } else {
                     Task::none()
@@ -363,18 +353,19 @@ fn tick_stream() -> impl Stream<Item = Msg> {
     )
 }
 
-/// Fetch an artist's albums, collect the playable songs (`!is_dir`), shuffle.
+/// Fetch an artist's albums, collect the songs, shuffle.
 ///
-/// Shuffle lives in the caller for now, not the engine.
+/// Shuffle lives in the caller for now, not the engine. A neutral
+/// [`crate::library::ArtistDetail`] already lists albums — no `is_dir` filter
+/// (splits live inside a single library, not across id hierarchies).
 async fn collect_shuffled_songs(
-    client: Arc<Client>,
-    artist_id: String,
+    manager: Arc<Manager>,
+    artist_id: ArtistId,
 ) -> Result<Vec<engine::Track>, engine::EngineError> {
-    let artist = client.get_artist(&artist_id).await?;
+    let detail = manager.artist(&artist_id).await?;
     let mut songs = Vec::new();
-    for album in artist.album {
-        let album_songs = client.get_album(&album.id).await?;
-        songs.extend(album_songs.song.into_iter().filter(|song| !song.is_dir));
+    for album in detail.albums {
+        songs.extend(manager.album(&album.id).await?.songs);
     }
     fisher_yates(&mut songs, &mut rand::rng()); // sure bro
     Ok(songs)

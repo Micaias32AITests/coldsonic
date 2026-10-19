@@ -1,31 +1,29 @@
-use async_compat::Compat;
 use bytes::Bytes;
 use iced_fonts::lucide;
-use opensubsonic::Client;
-use opensubsonic::data::ArtistId3;
 
+use crate::library::{Artist, ArtistId, CoverId, Manager};
 use crate::prelude::*;
 
 #[derive(Debug, Clone)]
 pub struct State {
-    client: Arc<Client>,
+    manager: Arc<Manager>,
     rows: Vec<Row>,
+    /// Distinguishes "still loading" from "loaded, nothing here".
+    loaded: bool,
 }
 
 #[derive(Debug, Clone)]
 struct Row {
-    artist: ArtistId3,
+    artist: Artist,
     cover: CoverState,
 }
 
 /// Logical size of the cover cell in the table.
 const COVER_DISPLAY: f32 = 48.0;
 
-/// Pixel size requested from the server (2x the display size for HiDPI).
-///
-/// The server returns a downsized image, which keeps the download, decode and
-/// GPU upload small.
-const COVER_PX: i32 = 96;
+/// Pixel size requested from the library (2x the display size for HiDPI;
+/// the offline store returns art as stored, a networked provider downsizes).
+const COVER_PX: u32 = 96;
 
 #[derive(Debug, Clone)]
 enum CoverState {
@@ -41,17 +39,17 @@ enum CoverState {
 
 #[derive(Debug, Clone)]
 pub enum Msg {
-    ArtistsLoaded(Vec<ArtistId3>),
+    ArtistsLoaded(Vec<Artist>),
     ArtistsLoadFailed,
-    ArtistClicked(String),
-    CoverLoaded(String, Result<Bytes, ()>),
-    PlayShuffled(String),
+    ArtistClicked(ArtistId),
+    CoverLoaded(CoverId, Result<Bytes, ()>),
+    PlayShuffled(ArtistId),
 }
 
 /// Events this screen raises to its parent (`MainScreen`, the coordinator).
 #[derive(Debug, Clone)]
 pub enum Event {
-    PlayShuffled(String /* artist id */),
+    PlayShuffled(ArtistId),
 }
 
 impl Screen for State {
@@ -59,28 +57,23 @@ impl Screen for State {
 
     type Emit = Event;
 
-    type InitData = Arc<Client>;
+    type InitData = Arc<Manager>;
 
-    fn init(client: Self::InitData) -> (Self, Action<Self::Msg, Self::Emit>)
+    fn init(manager: Self::InitData) -> (Self, Action<Self::Msg, Self::Emit>)
     where
         Self: Sized,
     {
-        let client_for_load = client.clone();
+        let manager_for_load = manager.clone();
         (
             Self {
+                manager,
                 rows: Vec::new(),
-                client,
+                loaded: false,
             },
             Action::task(Task::perform(
-                Compat::new(async move { client_for_load.get_artists(None).await }),
+                async move { manager_for_load.artists().await },
                 |res| match res {
-                    Ok(artists) => Msg::ArtistsLoaded(
-                        artists
-                            .index
-                            .into_iter()
-                            .flat_map(|index| index.artist)
-                            .collect(),
-                    ),
+                    Ok(artists) => Msg::ArtistsLoaded(artists),
                     Err(_) => Msg::ArtistsLoadFailed,
                 },
             )),
@@ -92,29 +85,27 @@ impl Screen for State {
             Msg::ArtistsLoaded(artists) => {
                 let mut rows = Vec::with_capacity(artists.len());
                 let mut tasks = Vec::new();
-                eprintln!("loading artists");
                 for artist in artists.into_iter() {
-                    if artist.cover_art.is_some() {
-                        let client = self.client.clone();
-                        let id = artist.id.clone();
-                        let fetch_id = id.clone();
+                    if let Some(cover) = artist.cover.clone() {
+                        let manager = self.manager.clone();
+                        let fetch_cover = cover.clone();
                         tasks.push(Task::perform(
-                            Compat::new(async move {
-                                client.get_cover_art(&fetch_id, Some(COVER_PX)).await
-                            }),
-                            move |res| Msg::CoverLoaded(id, res.map_err(|_| ())),
+                            async move { manager.cover(&fetch_cover, COVER_PX).await },
+                            move |res| Msg::CoverLoaded(cover, res.map_err(|_| ())),
                         ));
+                        rows.push(Row {
+                            artist,
+                            cover: CoverState::Loading,
+                        });
+                    } else {
+                        rows.push(Row {
+                            artist,
+                            cover: CoverState::NotLoaded,
+                        });
                     }
-                    rows.push(Row {
-                        cover: if artist.cover_art.is_some() {
-                            CoverState::Loading
-                        } else {
-                            CoverState::NotLoaded
-                        },
-                        artist,
-                    });
                 }
                 self.rows = rows;
+                self.loaded = true;
                 if tasks.is_empty() {
                     Action::none()
                 } else {
@@ -122,24 +113,26 @@ impl Screen for State {
                 }
             }
             Msg::ArtistsLoadFailed => {
-                eprintln!("[artists] failed to load artists");
+                warn!("failed to load artists");
+                self.rows = Vec::new();
+                self.loaded = true;
                 Action::none()
             }
             Msg::ArtistClicked(id) => {
-                println!("[artists] artist clicked: {id}");
+                debug!(id = %id.as_str(), "artist clicked");
                 Action::none()
             }
             Msg::CoverLoaded(id, result) => {
-                eprintln!("loaded cover for {id}");
-                let Some(row) = self.rows.iter_mut().find(|row| row.artist.id == id) else {
+                let Some(row) = self
+                    .rows
+                    .iter_mut()
+                    .find(|row| row.artist.cover.as_ref() == Some(&id))
+                else {
                     return Action::none();
                 };
                 row.cover = match result {
                     Ok(bytes) => CoverState::Loaded(image::Handle::from_bytes(bytes)),
-                    Err(_) => {
-                        eprintln!("failed to load {id}");
-                        CoverState::Failed
-                    }
+                    Err(_) => CoverState::Failed,
                 };
                 Action::none()
             }
@@ -148,20 +141,27 @@ impl Screen for State {
     }
 
     fn view(&self) -> iced::Element<'_, Self::Msg> {
-        if self.rows.is_empty() {
+        if !self.loaded {
             return text("loading...").into();
+        }
+        if self.rows.is_empty() {
+            return container(text("No artists found").color([0.6, 0.6, 0.6]))
+                .center(Fill)
+                .into();
         }
         let list = table(
             [
                 table::column(text(""), |row: Row| cover_cell(row)),
                 table::column(text("Artist"), |row: Row| {
                     Element::from(
-                        button(text(row.artist.name))
+                        button(text(row.artist.name.clone()))
                             .on_press(Msg::ArtistClicked(row.artist.id.clone())),
                     )
                 })
                 .width(Fill),
-                table::column(text("Albums"), |row: Row| text(album_count(&row.artist))),
+                table::column(text("Albums"), |row: Row| {
+                    text(row.artist.album_count.to_string())
+                }),
                 table::column(text(""), |row: Row| shuffle_button(row)),
             ],
             self.rows.clone(),
@@ -178,15 +178,15 @@ fn cover_cell(row: Row) -> Element<'static, Msg> {
             .width(COVER_DISPLAY)
             .height(COVER_DISPLAY)
             .into(),
-        _ => text("loading").into(),
+        CoverState::Loading => text("…").into(),
+        // No art (offline libraries) or a failed fetch: neutral placeholder.
+        _ => container(lucide::music().size(20).color([0.5, 0.5, 0.5]))
+            .width(COVER_DISPLAY)
+            .height(COVER_DISPLAY)
+            .align_x(Center)
+            .align_y(Center)
+            .into(),
     }
-}
-
-fn album_count(artist: &ArtistId3) -> String {
-    artist
-        .album_count
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| "–".to_string())
 }
 
 fn shuffle_button(row: Row) -> Element<'static, Msg> {

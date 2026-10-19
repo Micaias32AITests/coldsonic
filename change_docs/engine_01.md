@@ -30,9 +30,7 @@ Facets 1–3 are separate, verifiable milestones; each builds on the previous.
   pushed state; they never touch audio.
 - **Mock-first:** Facet 1 ships zero new audio/network dependencies and validates
   the pipe with a fake engine.
-- **Track type:** `pub type Track = opensubsonic::data::Child;` — already carries
-  `id` (fetching), `duration`, `title`/`artist`/`album`, `cover_art`. Filters:
-  only playable entries (`!is_dir`), usually via album song lists.
+- **Track type:** `pub type Track = crate::library::Track;` — neutral track from the library seam. It carries `id` (prefixed for routing), `title`, `artist`, `album`, `track_no`, `duration`, `cover`. Audio bytes are fetched via `Manager::track_bytes(&track.id)`.
 - **Engine owner:** `MainScreen` (the coordinator). Lift to top-level `State`
   only if a need outside it appears.
 - **Tick:** 250 ms, `const` — fast enough to notice track-end within ~1/4 s and
@@ -57,13 +55,14 @@ Facets 1–3 are separate, verifiable milestones; each builds on the previous.
 
 ```rust
 /// What we play. See "Locked in decisions" — Child carries everything we need.
-pub type Track = opensubsonic::data::Child;
+pub type Track = crate::library::Track;
 
 pub enum EngineMsg {
     PlayQueue(Vec<Track>),   // replace queue, play first
     PlayNext(Track),         // play now, insert at front
     Enqueue(Track),          // append to queue end
     Next,                    // skip to next queued track
+    Prev,
     Pause, Resume, Toggle, Stop,
     SetVolume(f32),
     Seek(std::time::Duration), // Facet 2+ (best-effort)
@@ -74,7 +73,7 @@ pub enum EngineMsg {
 pub enum EngineEvent {
     PlaybackStarted(Track),
     TrackFinished(Track),          // scrobble-submission hook (Facet 4)
-    Paused, Resumed, Stopped, QueueChanged,
+    Paused, Resumed, Stopped, SeekDone, UpdateNowPlaying, QueueChanged,
     Error(String),
 }
 
@@ -83,6 +82,7 @@ pub struct NowPlaying {            // snapshot pushed to UI
     pub position: std::time::Duration,
     pub duration: std::time::Duration,
     pub state: PlaybackState,      // Stopped | Loading | Playing | Paused
+    pub volume: f32,
 }
 ```
 
@@ -102,8 +102,7 @@ impl Engine {
 }
 ```
 
-`EngineError` = `thiserror` enum wrapping `opensubsonic::Error` (+ decode errors
-later). Reuses the crate's `Action<T, U>` (`None | Task | Emit`) so engine
+`EngineError` = `thiserror` enum wrapping `crate::library::LibraryError` (+ decode errors later). Reuses the crate's `Action<T, U>` (`None | Task | Emit`) so engine
 commands machine with the same plumbing as screens.
 
 If `MainScreen`/`State` cannot keep deriving `Clone` once the real engine exists
@@ -114,12 +113,12 @@ iced does not require them.
 
 `src/engine/mock.rs` — same seam, no audio:
 
-- Every incoming `EngineMsg` is logged (`eprintln!`, matching current style).
+- Every incoming `EngineMsg` is logged (via `tracing::info!`, matching current style).
 - Keeps a fake `VecDeque<Track>` + fake position. On `PlayQueue`: store queue,
   set `current`, emit `QueueChanged` + `PlaybackStarted`. On `tick`: advance
   position (simulate ~1 s per tick so the bar visibly moves), and after a short
   fake duration (10 s, `const`) emit `TrackFinished`, advance to next queued
-  track (auto-advance), repeat. `Pause/Resume/Toggle/Stop/Next/PlayNext/Enqueue`
+  track (auto-advance), repeat. `Pause/Resume/Toggle/Stop/Next/Prev/PlayNext/Enqueue`
   behave and emit.
 - `now_playing()` returns the current track + fake position/duration.
 
@@ -137,17 +136,16 @@ iced does not require them.
     on `Msg::Tick` call `engine.tick()` and apply events to `now_playing`
     (also log them — this is the "watch the events flow" verification).
   - Now-playing bar: shows `now_playing` (title/artist, position/duration from
-    the snapshot) + minimal control buttons **pause/resume/next** emitting
+    the snapshot) + minimal control buttons **pause/resume/prev/next** emitting
     `Msg::Engine(...)` — exercising the full pipe.
 - **`src/screen/artists.rs`:**
-  - `type Emit = Never` → `pub enum Event { PlayShuffled(String /* artist id */) }`.
+  - `type Emit = Never` → `pub enum Event { PlayShuffled(ArtistId) }`.
   - `Msg::PlayShuffled` handler: `Action::emit(Event::PlayShuffled(id))` instead
     of the current no-op.
 - **MainScreen maps artists' emit** (via `Action.handle(.., on_emit)`):
-  `Task::perform(Compat::new(collect_shuffled_songs(client, id)))` →
+  `Task::perform(collect_shuffled_songs(manager.clone(), id))` →
   `Msg::Engine(EngineMsg::PlayQueue(tracks))`.
-  `collect_shuffled_songs`: `get_artist(id)` → `artist.album` ids →
-  `get_album(id)` → `song: Vec<Child>` (filter `!is_dir`) → flatten → shuffle.
+  `collect_shuffled_songs`: uses `Manager::artist()` then for each album `Manager::album()` → collects songs → shuffle.
 - **Shuffle:** add `rand` for a Fisher–Yates shuffle (only new dep in Facet 1).
   Shuffle lives in the caller for now, not the engine.
 
@@ -156,7 +154,7 @@ iced does not require them.
 - `cargo build` + `cargo clippy -- -D warnings` clean.
 - Log in → Artists → hit shuffle: log shows `PlayQueue(n tracks)`; the bar shows
   a mock track, position advances each tick, tracks auto-advance through the
-  queue; pause/resume/next/stop all change the bar state correctly. This proves
+  queue; pause/resume/prev/next/stop all change the bar state correctly. This proves
   the whole intent→event→coordinator→view pipe before audio exists.
 
 ## Facet 2 — Real playback engine (adds `rodio = "0.22"`, `libasound2-dev`)
@@ -179,14 +177,12 @@ iced does not require them.
     next, state = Loading. (No prefetch yet — Facet 4.)
   - `Err` → `EngineEvent::Error(String)` + back to `Stopped` (server JSON errors
     on `stream`, expired auth, network).
-- Fetch (no cache yet): `client.stream(id, None, None, None, None)` wrapped in
-  `async_compat::Compat`, whole file in memory (see Out of scope).
+- Fetch (no cache yet): `manager.track_bytes(&track.id)` (async via the library seam). For offline tracks this reads the file from disk; for future providers it streams via their API. Uses `async_compat::Compat` as needed in iced Tasks.
 - Seek: best-effort `Player::try_seek`. rodio's wrapper chain
   (`speed/track_position/pausable/amplify/skippable/stoppable/periodic_access`)
   may not forward seek; if unsupported, fall back to stop + restart. Verify and
   document the outcome in `sound.md`.
-- Swap: `MainScreen` constructs `Engine::Real(RealEngine::open(client))` — no
-  UI changes beyond construction.
+- Swap: `MainScreen` constructs `Engine::Real(RealEngine::open(manager.clone()))` — no UI changes beyond construction.
 
 ### Facet 2 verification
 
@@ -197,18 +193,16 @@ iced does not require them.
 
 ## Facet 3 — Disk cache with LRU + `settings.toml` (no new deps)
 
-- **Config:** `src/config.rs` gains `Settings` (sibling of `Credentials`),
+- **Config:** `src/config.rs` gains `Settings`,
   loaded from `config_dir()/settings.toml`:
   ```toml
   cache_max_size_mb = 512
   ```
-  → `CacheConfig { max_size_bytes: u64, cache_dir: PathBuf }`
-  (`cache_dir()` already exists).
+  → `Settings { cache_max_size_mb: u64 }` (or store `CacheConfig { max_size_bytes: u64, cache_dir: PathBuf }` derived from it). `cache_dir()` already exists.
 - **`src/engine/cache.rs`:**
   - `Cache { root: PathBuf, max_size_bytes: u64 }`, `Arc`-shareable
     (`Send + Sync`, plain file IO), namespaces `stream` / `cover`.
-  - Keys: server ids are untrusted strings → hash before using as a path
-    component.
+  - Keys: track/cover ids (prefixed) are untrusted strings → hash before using as a path component.
   - Manifest `index.toml` (serde + `toml`, already a dep): `key →
     { namespace, size, last_accessed }`.
   - `get(namespace, key) -> Option<Bytes>`: touch `last_accessed`, rewrite
@@ -217,9 +211,8 @@ iced does not require them.
     then **while total size > max, evict the least-recently-accessed entry**
     (delete file + drop from manifest).
   - `invalidate(namespace, key)`.
-- **`src/engine/fetch.rs`:** `stream_track(client, cache, &Track)` —
-  `cache.get("stream", id)` → on hit return; on miss `client.stream(...)` →
-  `cache.put` → return.
+- **`src/engine/fetch.rs`:** `stream_track(manager: Arc<Manager>, cache, &Track)` —
+  `cache.get("stream", &track.id)` → on hit return; on miss `manager.track_bytes(&track.id)` → `cache.put` → return.
 - **Corruption fallback:** if `Decoder` fails on cached bytes, the engine
   `invalidate`s + refetches once (`real.rs` retries with a per-track attempt
   count).
@@ -228,8 +221,7 @@ iced does not require them.
 
 ### Facet 3 verification
 
-- Play a queue once → cache dir fills; replay the same artist with the server
-  unreachable → plays from disk (proves cache hit path).
+- Play a queue once → cache dir fills; replay the same artist in offline mode or with tracks available via cache → plays from disk (proves cache hit path).
 - Set `cache_max_size_mb` tiny (e.g. 5) → oldest entries evict as new tracks
   stream; total stays under the cap.
 - Corrupt a cached file (truncate it) → plays anyway after one refetch.
@@ -238,9 +230,9 @@ iced does not require them.
 
 Prefetch next track into a one-slot buffer while playing (near-gapless; cache
 already covers repeat plays); scrobbling (`PlaybackStarted` →
-`client.scrobble(id, now, false)` "now playing", `TrackFinished` →
+`manager.scrobble(id, now, false)` (future method on Manager) "now playing", `TrackFinished` →
 `submission = true`, threshold notes — e.g. ≥50% or skip-counts); downloads
-(`client.download` through the cache, `download` namespace); cover-cache
+(manager/download through the cache, `download` namespace); cover-cache
 migration (artists screen fetches via cache); player screen; transcoding
 (`maxBitRate`/`format`); cache eviction tuning.
 

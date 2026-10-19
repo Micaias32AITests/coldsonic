@@ -74,17 +74,21 @@ impl Manager {
                 root,
                 scan,
                 enabled,
+                never_split,
             } = config;
             if !*enabled {
+                tracing::debug!(%id, "skipping disabled library");
                 continue;
             }
-            let library = OfflineLibrary::open(root.clone(), *scan)
+            tracing::info!(%id, %name, root = %root.display(), ?scan, "opening library");
+            let library = OfflineLibrary::open(root.clone(), *scan, never_split.clone())
                 .await
                 .map_err(|err| {
                     LibraryError::Invalid(format!(
                         "failed to open library '{name}' (id '{id}'): {err}"
                     ))
                 })?;
+            tracing::info!(%id, "library opened");
             libraries.push(Opened {
                 config: config.clone(),
                 library: Library::Offline(library),
@@ -106,7 +110,7 @@ impl Manager {
         for opened in &self.libraries {
             let prefix = opened.config.identifier();
             for mut artist in opened.library.artists().await? {
-                artist.id = ArtistId::new(format!("{prefix}:{}", artist.id.as_str()));
+                re_prefix_artist(prefix, &mut artist);
                 artists.push(artist);
             }
         }
@@ -118,7 +122,7 @@ impl Manager {
         let (opened, rest) = route(&self.libraries, id.as_str())?;
         let mut detail = opened.library.artist(&ArtistId::new(rest)).await?;
         let prefix = opened.config.identifier();
-        detail.artist.id = ArtistId::new(format!("{prefix}:{}", detail.artist.id.as_str()));
+        re_prefix_artist(prefix, &mut detail.artist);
         for album in &mut detail.albums {
             re_prefix_album(prefix, album);
         }
@@ -140,6 +144,11 @@ impl Manager {
         let (opened, rest) = route(&self.libraries, id.as_str())?;
         opened.library.cover(&CoverId::new(rest), px).await
     }
+
+    pub async fn track_bytes(&self, id: &TrackId) -> Result<Bytes, LibraryError> {
+        let (opened, rest) = route(&self.libraries, id.as_str())?;
+        opened.library.track_bytes(&TrackId::new(rest)).await
+    }
 }
 
 /// Split at the first `:`, find the library whose identifier matches, strip
@@ -155,6 +164,13 @@ fn route<'a>(libraries: &'a [Opened], id: &str) -> Result<(&'a Opened, String), 
         .find(|o| o.config.identifier() == prefix)
         .ok_or_else(|| LibraryError::NotFound(format!("unknown library identifier: {prefix}")))?;
     Ok((opened, rest.to_string()))
+}
+
+fn re_prefix_artist(prefix: &str, artist: &mut Artist) {
+    artist.id = ArtistId::new(format!("{prefix}:{}", artist.id.as_str()));
+    if let Some(cover) = &artist.cover {
+        artist.cover = Some(CoverId::new(format!("{prefix}:{}", cover.as_str())));
+    }
 }
 
 fn re_prefix_album(prefix: &str, album: &mut Album) {
@@ -197,6 +213,7 @@ mod tests {
             root,
             scan,
             enabled,
+            never_split: Vec::new(),
         }
     }
 

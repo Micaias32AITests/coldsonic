@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use bytes::Bytes;
 
 use crate::library::{
-    AlbumDetail, AlbumId, Artist, ArtistDetail, ArtistId, CoverId, LibraryError, ScanMode,
+    AlbumDetail, AlbumId, Artist, ArtistDetail, ArtistId, CoverId, LibraryError, ScanMode, TrackId,
 };
 
 use store::MemoryStore;
@@ -27,16 +27,25 @@ pub struct OfflineLibrary {
     /// Kept for a future rescan; not read after open.
     #[allow(dead_code)]
     mode: ScanMode,
+    /// Kept for a future rescan; not read after open.
+    #[allow(dead_code)]
+    never_split: Vec<String>,
     store: MemoryStore,
 }
 
 impl OfflineLibrary {
-    pub async fn open(root: PathBuf, mode: ScanMode) -> Result<Self, LibraryError> {
+    pub async fn open(
+        root: PathBuf,
+        mode: ScanMode,
+        never_split: Vec<String>,
+    ) -> Result<Self, LibraryError> {
         let scan_root = root.clone();
-        let data = smol::unblock(move || scan::scan(&scan_root, mode)).await?;
+        let scan_split = never_split.clone();
+        let data = smol::unblock(move || scan::scan(&scan_root, mode, &scan_split)).await?;
         Ok(Self {
             root,
             mode,
+            never_split,
             store: MemoryStore::from(data),
         })
     }
@@ -65,6 +74,15 @@ impl OfflineLibrary {
             .await
             .map(Bytes::from)
             .ok_or_else(|| LibraryError::NotFound(format!("no cover {}", id.as_str())))
+    }
+
+    pub async fn track_bytes(&self, id: &TrackId) -> Result<Bytes, LibraryError> {
+        let rel = id.as_str();
+        let path = self.root.join(rel);
+        let data = smol::fs::read(&path)
+            .await
+            .map_err(LibraryError::Io)?;
+        Ok(Bytes::from(data))
     }
 }
 
@@ -172,7 +190,15 @@ mod tests {
     }
 
     fn open(root: PathBuf, mode: ScanMode) -> OfflineLibrary {
-        smol::block_on(OfflineLibrary::open(root, mode)).expect("open library")
+        smol::block_on(OfflineLibrary::open(root, mode, Vec::new())).expect("open library")
+    }
+
+    fn open_with_never_split(
+        root: PathBuf,
+        mode: ScanMode,
+        never_split: Vec<String>,
+    ) -> OfflineLibrary {
+        smol::block_on(OfflineLibrary::open(root, mode, never_split)).expect("open library")
     }
 
     #[test]
@@ -313,6 +339,7 @@ mod tests {
         let err = smol::block_on(OfflineLibrary::open(
             PathBuf::from("/definitely/not/a/real/library/root"),
             ScanMode::Tags,
+            Vec::new(),
         ))
         .expect_err("missing root");
         assert!(matches!(err, LibraryError::Io(_)));
@@ -330,5 +357,103 @@ mod tests {
         let cover = album.album.cover.expect("cover through the enum");
         let bytes = smol::block_on(library.cover(&cover, 0)).expect("cover bytes");
         assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn tags_mode_normalizes_primary_artist() {
+        let temp = TempTree::new();
+        copy_tree(&fixtures().join("tags"), temp.path());
+        write_tags(
+            &temp.path().join("alpha.mp3"),
+            Some("Alpha Song"),
+            Some("Alpha Artist feat. Guest"),
+            Some("Album One"),
+            Some(1),
+            None,
+        );
+        write_tags(
+            &temp.path().join("beta.mp3"),
+            Some("Beta Song"),
+            Some("Alpha Artist & Friend"),
+            Some("Album One"),
+            Some(2),
+            None,
+        );
+        write_tags(
+            &temp.path().join("gamma.mp3"),
+            Some("Gamma Song"),
+            Some("Alpha Artist, Guest Two"),
+            Some("Album Two"),
+            Some(1),
+            None,
+        );
+        // delta.mp3 stays untagged: unknown-artist fallback.
+
+        let lib = open(temp.path().to_path_buf(), ScanMode::Tags);
+
+        let artists = smol::block_on(lib.artists()).expect("artists");
+        let names: Vec<&str> = artists.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["Alpha Artist", "Unknown Artist"]);
+        let alpha = smol::block_on(lib.artist(&ArtistId::new("Alpha Artist"))).expect("alpha");
+        assert_eq!(alpha.albums.len(), 2);
+        assert_eq!(alpha.albums[0].song_count, 2);
+        assert_eq!(alpha.albums[1].song_count, 1);
+    }
+
+    #[test]
+    fn tags_mode_never_split_blacklist() {
+        let temp = TempTree::new();
+        copy_tree(&fixtures().join("tags"), temp.path());
+        write_tags(
+            &temp.path().join("alpha.mp3"),
+            Some("Alpha Song"),
+            Some("For KING & COUNTRY"),
+            Some("Burn the Ships"),
+            Some(1),
+            None,
+        );
+        write_tags(
+            &temp.path().join("beta.mp3"),
+            Some("Beta Song"),
+            Some("Simon & Garfunkel"),
+            Some("Bridge Over Troubled Water"),
+            Some(1),
+            None,
+        );
+
+        let lib = open_with_never_split(
+            temp.path().to_path_buf(),
+            ScanMode::Tags,
+            vec!["For KING & COUNTRY".into(), "simon & garfunkel".into()],
+        );
+
+        let artists = smol::block_on(lib.artists()).expect("artists");
+        let names: Vec<&str> = artists.iter().map(|a| a.name.as_str()).collect();
+        // gamma/delta.mp3 stay untagged: unknown-artist fallback.
+        assert_eq!(
+            names,
+            ["For KING & COUNTRY", "Simon & Garfunkel", "Unknown Artist"]
+        );
+    }
+
+    #[test]
+    fn folders_mode_trims_but_never_splits() {
+        let temp = TempTree::new();
+        let album_dir = temp
+            .path()
+            .join("For KING & COUNTRY")
+            .join("Burn the Ships");
+        std::fs::create_dir_all(&album_dir).expect("create album dir");
+        std::fs::copy(
+            fixtures().join("tags").join("alpha.mp3"),
+            album_dir.join("01 - Track.mp3"),
+        )
+        .expect("copy track");
+
+        let lib = open(temp.path().to_path_buf(), ScanMode::Folders);
+
+        let artists = smol::block_on(lib.artists()).expect("artists");
+        assert_eq!(artists.len(), 1);
+        assert_eq!(artists[0].name, "For KING & COUNTRY");
     }
 }

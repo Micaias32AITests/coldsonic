@@ -51,7 +51,7 @@ impl MockEngine {
     }
 
     pub fn update(&mut self, msg: EngineMsg) -> Action<EngineMsg, EngineEvent> {
-        eprintln!("[engine] {msg:?}");
+        tracing::info!(?msg, "engine msg");
         match msg {
             EngineMsg::PlayQueue(tracks) => {
                 self.queue = tracks.into();
@@ -168,12 +168,13 @@ impl MockEngine {
                 let max = self
                     .current
                     .as_ref()
-                    .and_then(|track| track.duration)
-                    .map(|d| Duration::from_secs(d as u64))
+                    .map(|track| track.duration)
                     .unwrap_or(Duration::from_secs(10));
                 self.position = position.min(max);
                 self.pending.push_back(EngineEvent::SeekDone);
             }
+            EngineMsg::BytesReady { .. } => {}
+
         }
         self.next_emit()
     }
@@ -184,10 +185,11 @@ impl MockEngine {
         if self.state == PlaybackState::Playing {
             self.position += SIMULATED_SECONDS_PER_TICK;
             events.push(EngineEvent::UpdateNowPlaying);
-            if self.current.as_ref().is_some_and(|t| {
-                t.duration
-                    .is_some_and(|d| Duration::from_secs(d as u64) <= self.position)
-            }) {
+            if self
+                .current
+                .as_ref()
+                .is_some_and(|t| t.duration <= self.position)
+            {
                 let finished = self.current.clone().expect("playing ⇒ current is set");
                 events.push(EngineEvent::TrackFinished(finished));
                 self.advance();
@@ -201,10 +203,7 @@ impl MockEngine {
         let track = self.current.clone()?;
         Some(NowPlaying {
             position: self.position,
-            duration: track
-                .duration
-                .map(|i| Duration::from_secs(i as u64))
-                .unwrap_or_default(),
+            duration: track.duration,
             track,
             state: self.state,
             volume: self.volume,
@@ -239,3 +238,4 @@ impl MockEngine {
         }
     }
 }
+

@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use lofty::prelude::{Accessor, AudioFile, TaggedFileExt};
 
-use crate::library::ScanMode;
+use crate::library::{ScanMode, primary_artist};
 
 const UNKNOWN_ARTIST: &str = "Unknown Artist";
 const UNKNOWN_ALBUM: &str = "Unknown Album";
@@ -86,7 +86,7 @@ struct AlbumGroup {
     cover: Option<(String, Vec<u8>)>,
 }
 
-pub(super) fn scan(root: &Path, mode: ScanMode) -> io::Result<ScanData> {
+pub(super) fn scan(root: &Path, mode: ScanMode, never_split: &[String]) -> io::Result<ScanData> {
     if !root.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -98,10 +98,18 @@ pub(super) fn scan(root: &Path, mode: ScanMode) -> io::Result<ScanData> {
     files.sort();
     let mut groups: Vec<AlbumGroup> = Vec::new();
     let mut index: HashMap<(String, String), usize> = HashMap::new();
+    // First-seen spelling per case-folded artist, so "Kendrick Lamar" and
+    // "kendrick lamar" merge into one artist with one canonical name.
+    let mut canonical: HashMap<String, String> = HashMap::new();
     for path in files {
-        let Some(mut meta) = read_file(&path, mode, root) else {
+        let Some(mut meta) = read_file(&path, mode, root, never_split) else {
             continue;
         };
+        let display = canonical
+            .entry(meta.artist.to_lowercase())
+            .or_insert_with(|| meta.artist.clone())
+            .clone();
+        meta.artist = display;
         let group_idx = match index.get(&(meta.artist.clone(), meta.album.clone())) {
             Some(&idx) => idx,
             None => {
@@ -164,14 +172,15 @@ fn file_stem(path: &Path) -> String {
 }
 
 /// One lofty read per file: duration always, names/picture per mode.
-fn read_file(path: &Path, mode: ScanMode, root: &Path) -> Option<FileMeta> {
+///
+/// Tag credits go through [`primary_artist`] (feat/`&`/`,` splitting, with
+/// the library's `never_split` blacklist); folder names are trim-only — they
+/// are deliberate structure, not heuristics.
+fn read_file(path: &Path, mode: ScanMode, root: &Path, never_split: &[String]) -> Option<FileMeta> {
     let tagged = match lofty::read_from_path(path) {
         Ok(tagged) => tagged,
         Err(err) => {
-            eprintln!(
-                "[library] skipping unreadable file {}: {err}",
-                path.display()
-            );
+            tracing::warn!(path = %path.display(), %err, "skipping unreadable file");
             return None;
         }
     };
@@ -187,7 +196,7 @@ fn read_file(path: &Path, mode: ScanMode, root: &Path) -> Option<FileMeta> {
                     .map(|s| s.into_owned())
                     .unwrap_or_else(|| file_stem(path)),
                 tag.artist()
-                    .map(|s| s.into_owned())
+                    .map(|s| primary_artist(&s, never_split))
                     .unwrap_or_else(|| UNKNOWN_ARTIST.into()),
                 tag.album()
                     .map(|s| s.into_owned())
@@ -204,7 +213,12 @@ fn read_file(path: &Path, mode: ScanMode, root: &Path) -> Option<FileMeta> {
         ScanMode::Folders => match rel_id(root, path).split('/').collect::<Vec<_>>().as_slice() {
             [artist, album, file] => {
                 let (title, track_no) = split_track_prefix(&file_stem(Path::new(file)));
-                (title, artist.to_string(), album.to_string(), track_no)
+                (
+                    title,
+                    artist.trim().to_string(),
+                    album.to_string(),
+                    track_no,
+                )
             }
             _ => (
                 file_stem(path),
@@ -258,7 +272,7 @@ fn read_folder_art(dir: &Path) -> Option<Vec<u8>> {
     match std::fs::read(&entry) {
         Ok(data) => Some(data),
         Err(err) => {
-            eprintln!("[library] unreadable folder art {}: {err}", entry.display());
+            tracing::warn!(path = %entry.display(), %err, "unreadable folder art");
             None
         }
     }

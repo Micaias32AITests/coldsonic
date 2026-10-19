@@ -38,17 +38,26 @@
         libxcursor
         libxi
         libxrandr
+        # rfd's xdg-desktop-portal backend dlopens libdbus-1.so
+        dbus
       ];
       commonArgs = {
         pname = cargoToml.package.name;
         version = cargoToml.package.version;
         src = craneLib.cleanCargoSource ./.;
-        nativeBuildInputs = [pkgs.pkg-config];
+        nativeBuildInputs = [
+          pkgs.pkg-config
+          pkgs.makeWrapper
+        ];
         buildInputs =
           [pkgs.alsa-lib]
           ++ dlopenLibraries;
         env.RUSTFLAGS = "-C link-arg=-Wl,-rpath,${pkgs.lib.makeLibraryPath dlopenLibraries}";
         dontPatchELF = true;
+        # zenity is rfd's fallback folder picker; put it on the app's PATH
+        postInstall = ''
+          wrapProgram $out/bin/coldsonic --prefix PATH : ${pkgs.lib.makeBinPath [pkgs.zenity]}
+        '';
       };
       cargoArtifacts = craneLib.buildDepsOnly commonArgs;
     in {

@@ -9,14 +9,17 @@
 //! in Facet 2 behind the same interface.
 
 pub mod mock;
+pub mod player;
+pub mod real;
 
 use std::time::Duration;
 
+use bytes::Bytes;
+
 use crate::Action;
 
-/// What we play. `Child` already carries `id` (fetching), `duration`,
-/// `title`/`artist`/`album`, `cover_art` — everything we need.
-pub type Track = opensubsonic::data::Child;
+/// What we play — the neutral track every provider hands over.
+pub type Track = crate::library::Track;
 
 /// Commands from the UI into the engine.
 #[derive(Debug, Clone)]
@@ -38,10 +41,9 @@ pub enum EngineMsg {
     Stop,
     SetVolume(f32),
     /// Facet 2+ (best-effort).
-    Seek(Duration), // NOTE: Facet 2 adds `BytesReady { generation, result }`
-                    // — deferred: its `Result<Bytes, EngineError>` breaks the
-                    // `Clone` bound iced's buttons need on `Msg`, and Facet 1
-                    // has no fetching anyway.
+    Seek(Duration),
+    /// Internal: async fetch finished.
+    BytesReady { generation: u64, result: Result<bytes::Bytes, EngineError> },
 }
 
 /// Events the engine pushes up to its owner. `MainScreen` is the coordinator
@@ -82,15 +84,15 @@ pub struct NowPlaying {
 /// Errors surfaced by the engine.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
-    #[error("subsonic error: {0}")]
-    Subsonic(#[from] opensubsonic::Error),
+    #[error("{0}")]
+    Library(#[from] crate::library::LibraryError),
 }
 
-/// The engine itself. An enum wrapper so `MainScreen` keeps on the same seam
-/// (`#[derive(Debug, Clone)]`) once the real engine lands in Facet 2.
+/// The engine itself. An enum wrapper so `MainScreen` keeps on the same seam.
 #[derive(Debug, Clone)]
 pub enum Engine {
     Mock(mock::MockEngine),
+    Real(real::RealEngine),
 }
 
 impl Engine {
@@ -98,11 +100,16 @@ impl Engine {
         Self::Mock(mock::MockEngine::new())
     }
 
+    pub fn real(manager: std::sync::Arc<crate::library::Manager>) -> Self {
+        Self::Real(real::RealEngine::new(manager))
+    }
+
     /// Route a UI command into the engine. The returned
     /// [`Action`](crate::Action) carries any immediate [`EngineEvent`].
     pub fn update(&mut self, msg: EngineMsg) -> Action<EngineMsg, EngineEvent> {
         match self {
             Engine::Mock(engine) => engine.update(msg),
+            Engine::Real(engine) => engine.update(msg),
         }
     }
 
@@ -110,12 +117,14 @@ impl Engine {
     pub fn tick(&mut self) -> Vec<EngineEvent> {
         match self {
             Engine::Mock(engine) => engine.tick(),
+            Engine::Real(engine) => engine.tick(),
         }
     }
 
     pub fn now_playing(&self) -> Option<NowPlaying> {
         match self {
             Engine::Mock(engine) => engine.now_playing(),
+            Engine::Real(engine) => engine.now_playing(),
         }
     }
 }

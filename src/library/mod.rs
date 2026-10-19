@@ -13,6 +13,7 @@ pub mod manager;
 pub mod offline;
 
 use std::collections::HashSet;
+use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -76,6 +77,10 @@ pub struct Artist {
     pub id: ArtistId,
     pub name: String,
     pub album_count: u32,
+    /// An artist-level picture when the provider has one; offline libraries
+    /// have none (their covers live on albums), so the table falls back to
+    /// a placeholder icon.
+    pub cover: Option<CoverId>,
 }
 
 /// An artist plus the albums under them.
@@ -147,6 +152,12 @@ impl Library {
             Library::Offline(library) => library.cover(id, px).await,
         }
     }
+
+    pub async fn track_bytes(&self, id: &TrackId) -> Result<Bytes, LibraryError> {
+        match self {
+            Library::Offline(library) => library.track_bytes(id).await,
+        }
+    }
 }
 
 /// How an offline library derives names from its files.
@@ -159,6 +170,15 @@ pub enum ScanMode {
     /// Names from the `Artist/Album/NN - Title.ext` directory structure;
     /// covers from folder-art files, else embedded pictures.
     Folders,
+}
+
+impl fmt::Display for ScanMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tags => f.write_str("By Song Metadata"),
+            Self::Folders => f.write_str("By Directory Structure"),
+        }
+    }
 }
 
 /// One entry of `libraries.toml`. The manager consumes it; `config.rs` only
@@ -176,6 +196,11 @@ pub enum LibraryConfig {
         scan: ScanMode,
         #[serde(default = "default_true")]
         enabled: bool,
+        /// Artist names that [`primary_artist`] must never split, e.g.
+        /// `"For KING & COUNTRY"` or a literal `"Simpson, Lisa"`.
+        /// Compared case-insensitively.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        never_split: Vec<String>,
     },
 }
 
@@ -184,6 +209,18 @@ impl LibraryConfig {
     pub fn identifier(&self) -> &str {
         match self {
             LibraryConfig::Offline { id, .. } => id,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            LibraryConfig::Offline { name, .. } => name,
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        match self {
+            LibraryConfig::Offline { enabled, .. } => *enabled,
         }
     }
 }
@@ -236,6 +273,52 @@ pub fn is_valid_id(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
+/// The primary artist of a raw credit string: everything before the first
+/// feat-token (`feat.`, `ft.`, `featuring`, …) or collaboration separator
+/// (`&`, `,`). Tags like `"Kendrick Lamar feat. GLC"` collapse to
+/// `"Kendrick Lamar"` so the track groups under the primary artist
+/// (MusicBrainz featuring style).
+///
+/// feat-stripping always runs (the guest is never the primary); the
+/// `never_split` blacklist then protects the remaining head from `&`/`,`
+/// splitting, for names that contain a separator as part of the artist
+/// (e.g. `"For KING & COUNTRY"`). Entries match case-insensitively.
+pub fn primary_artist(raw: &str, never_split: &[String]) -> String {
+    let head = split_at_feat(raw.trim()).trim();
+    if never_split
+        .iter()
+        .any(|keep| keep.trim().eq_ignore_ascii_case(head))
+    {
+        return head.to_string();
+    }
+    let primary = split_at_collab(head);
+    let primary = primary.trim();
+    if primary.is_empty() {
+        raw.trim().to_string()
+    } else {
+        primary.to_string()
+    }
+}
+
+/// Everything before the first collaboration separator: `" & "` or `", "`,
+/// whichever comes first. Both are space-delimited, so `"A&B"`/`"A,B"` pass
+/// through unchanged.
+fn split_at_collab(s: &str) -> &str {
+    let cut = [" & ", ", "].iter().filter_map(|sep| s.find(sep)).min();
+    cut.map_or(s, |pos| &s[..pos])
+}
+
+/// Everything before the first feat-token (space-delimited, dot optional).
+fn split_at_feat(s: &str) -> &str {
+    let lower = s.to_ascii_lowercase();
+    for needle in [" featuring ", " feat. ", " feat ", " ft. ", " ft "] {
+        if let Some(pos) = lower.find(needle) {
+            return &s[..pos];
+        }
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,5 +346,83 @@ mod tests {
         let taken = HashSet::from(["my-music".to_string(), "my-music-2".to_string()]);
         assert_eq!(slugify_unique("My Music", &taken), "my-music-3");
         assert_eq!(slugify_unique("Other", &taken), "other");
+    }
+
+    #[test]
+    fn primary_artist_splits_feat_tokens() {
+        let none = [];
+        assert_eq!(
+            primary_artist("Kendrick Lamar feat. GLC", &none),
+            "Kendrick Lamar"
+        );
+        assert_eq!(
+            primary_artist("Kendrick Lamar feat GLC", &none),
+            "Kendrick Lamar"
+        );
+        assert_eq!(primary_artist("A ft. B", &none), "A");
+        assert_eq!(primary_artist("A ft B", &none), "A");
+        assert_eq!(primary_artist("A Featuring B", &none), "A");
+        assert_eq!(primary_artist("A FEAT. B", &none), "A");
+    }
+
+    #[test]
+    fn primary_artist_splits_collab_separators() {
+        let none = [];
+        assert_eq!(
+            primary_artist("Kendrick Lamar & SZA", &none),
+            "Kendrick Lamar"
+        );
+        assert_eq!(
+            primary_artist("Kendrick Lamar, SZA", &none),
+            "Kendrick Lamar"
+        );
+        assert_eq!(primary_artist("A & B & C", &none), "A");
+        assert_eq!(primary_artist("A, B, C", &none), "A");
+        assert_eq!(primary_artist("A & B, C", &none), "A");
+        assert_eq!(primary_artist("A, B & C", &none), "A");
+        assert_eq!(primary_artist("A&B", &none), "A&B"); // needs spaces
+        assert_eq!(primary_artist("A,B", &none), "A,B"); // needs spaces
+    }
+
+    #[test]
+    fn primary_artist_never_split_short_circuits() {
+        let keep = [
+            "For KING & COUNTRY".to_string(),
+            "Simon & Garfunkel".to_string(),
+            "Simpson, Lisa".to_string(),
+        ];
+        assert_eq!(
+            primary_artist("For KING & COUNTRY", &keep),
+            "For KING & COUNTRY"
+        );
+        assert_eq!(
+            primary_artist("  for king & country  ", &keep),
+            "for king & country"
+        );
+        assert_eq!(
+            primary_artist("Simon & Garfunkel feat. Someone", &keep),
+            "Simon & Garfunkel"
+        );
+        assert_eq!(primary_artist("Simpson, Lisa", &keep), "Simpson, Lisa");
+        assert_eq!(
+            primary_artist("Kendrick Lamar & SZA", &keep),
+            "Kendrick Lamar"
+        );
+        assert_eq!(
+            primary_artist("Kendrick Lamar, SZA", &keep),
+            "Kendrick Lamar"
+        );
+    }
+
+    #[test]
+    fn primary_artist_trims_and_falls_back() {
+        let none = [];
+        assert_eq!(primary_artist("  Solo  ", &none), "Solo");
+        assert_eq!(primary_artist("feat. Only", &none), "feat. Only");
+        assert_eq!(primary_artist("", &none), "");
+        assert_eq!(primary_artist("A & B feat. C", &none), "A");
+        assert_eq!(primary_artist("A feat. B & C", &none), "A");
+        assert_eq!(primary_artist("A, B feat. C", &none), "A");
+        assert_eq!(primary_artist("A feat. B, C", &none), "A");
     }
 }

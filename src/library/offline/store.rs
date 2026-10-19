@@ -35,6 +35,7 @@ impl From<ScanData> for MemoryStore {
                 id: ArtistId::new(a.name.clone()),
                 name: a.name,
                 album_count: a.album_count,
+                cover: None,
             })
             .collect();
         artists.sort_by_key(|a| a.name.to_lowercase());

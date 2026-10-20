@@ -1,82 +1,91 @@
-//! Audio player (rodio) — wraps the device sink + player behind a small API.
+//! Audio player (rodio 0.22) — device sink + [`Player`] behind a small API.
+//!
+//! The [`MixerDeviceSink`] owns the `cpal::Stream` and is `!Send`; it must
+//! live on the UI thread. [`Player`] is `Send + Sync` and is what we actually
+//! drive (append / pause / seek / position).
 
+use std::fmt;
 use std::io::Cursor;
 use std::time::Duration;
 
 use bytes::Bytes;
-use rodio::{
-    Decoder, DeviceSink, DeviceSinkBuilder, Mixer, Player, OutputStreamBuilder, Sample, Source,
-};
-use rodio::cpal::traits::HostTrait;
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player};
 
-#[derive(Debug)]
+use super::EngineError;
+
 pub struct AudioPlayer {
-    _stream: rodio::OutputStream,
-    _mixer: Mixer,
-    sink: DeviceSink,
+    /// Owns the output stream. Dropping this stops all sound.
+    _sink: MixerDeviceSink,
     player: Player,
+}
+
+impl fmt::Debug for AudioPlayer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AudioPlayer")
+            .field("len", &self.player.len())
+            .field("pos", &self.player.get_pos())
+            .field("empty", &self.player.empty())
+            .finish_non_exhaustive()
+    }
 }
 
 impl AudioPlayer {
     pub fn open() -> Self {
-        let (stream, stream_handle) = OutputStreamBuilder::open_default_stream()
-            .expect("open default audio stream");
-        let mixer = Mixer::default();
-        stream_handle
-            .connect_to_output(&mixer)
-            .expect("connect mixer to output stream");
-        let sink = rodio::Sink::new(stream_handle);
-        // Use DeviceSink style via Player connected through mixer? Easier: build player
-        // But simpler approach using rodio's high-level API
-        // Alternatively, use Sink directly
-        let _ = sink;
-        // Simpler: use rodio::Sink
-        let sink = rodio::Sink::try_new(stream_handle).expect("create sink");
+        let mut sink = DeviceSinkBuilder::open_default_sink().expect("open default audio output");
+        sink.log_on_drop(false);
+        let player = Player::connect_new(sink.mixer());
+        player.set_volume(1.0);
         Self {
-            _stream: stream,
-            _mixer: mixer,
-            sink,
-            player: rodio::Player::new(mixer),
+            _sink: sink,
+            player,
         }
     }
 
-    pub fn play_bytes(&mut self, bytes: Bytes) {
-        let source = Decoder::new(Cursor::new(bytes)).expect("decode audio");
-        self.sink.append(source);
-        self.sink.play();
+    /// Decode and play `bytes` as the (only) current source.
+    pub fn play_bytes(&mut self, bytes: Bytes) -> Result<(), EngineError> {
+        let len = bytes.len() as u64;
+        let source = Decoder::builder()
+            .with_data(Cursor::new(bytes))
+            .with_byte_len(len)
+            .build()
+            .map_err(|err| EngineError::Decode(err.to_string()))?;
+        self.player.stop();
+        self.player.append(source);
+        self.player.play();
+        Ok(())
     }
 
     pub fn pause(&mut self) {
-        self.sink.pause();
+        self.player.pause();
     }
 
     pub fn resume(&mut self) {
-        self.sink.play();
+        self.player.play();
     }
 
     pub fn stop(&mut self) {
-        self.sink.stop();
-        self.sink.clear();
+        self.player.stop();
     }
 
-    pub fn clear(&mut self) {
-        self.sink.clear();
+    #[allow(dead_code)]
+    pub fn skip(&mut self) {
+        self.player.skip_one();
     }
 
     pub fn set_volume(&mut self, volume: f32) {
-        self.sink.set_volume(volume.clamp(0.0, 1.0));
+        self.player.set_volume(volume.clamp(0.0, 1.0));
     }
 
     pub fn position(&self) -> Duration {
-        // rodio's Sink doesn't track position easily in all cases; for now approximate
-        Duration::ZERO
+        self.player.get_pos()
     }
 
     pub fn empty(&self) -> bool {
-        self.sink.empty()
+        self.player.empty()
     }
 
-    pub fn try_seek(&mut self, _pos: Duration) -> bool {
-        false
+    /// Best-effort seek. Returns `false` when the current source cannot seek.
+    pub fn try_seek(&mut self, pos: Duration) -> bool {
+        self.player.try_seek(pos).is_ok()
     }
 }

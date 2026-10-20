@@ -19,7 +19,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum State {
     Setup(library_setup::State),
     // boxed cuz clippy is a bitch (a good one)

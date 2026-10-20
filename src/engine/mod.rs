@@ -4,19 +4,18 @@
 //! upward to its owner (`MainScreen`, the coordinator), which pushes state
 //! down to the views. Screens raise *intents* ([`EngineMsg`]) and read pushed
 //! state; they never touch audio.
-//!
-//! Facet 1 ships a mock engine behind this seam; the real one (rodio) arrives
-//! in Facet 2 behind the same interface.
 
 pub mod mock;
 pub mod player;
 pub mod real;
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
+use iced::Task;
 
 use crate::Action;
+use crate::library::Manager;
 
 /// What we play — the neutral track every provider hands over.
 pub type Track = crate::library::Track;
@@ -40,10 +39,13 @@ pub enum EngineMsg {
     Toggle,
     Stop,
     SetVolume(f32),
-    /// Facet 2+ (best-effort).
+    /// Best-effort.
     Seek(Duration),
     /// Internal: async fetch finished.
-    BytesReady { generation: u64, result: Result<bytes::Bytes, EngineError> },
+    BytesReady {
+        generation: u64,
+        result: Result<bytes::Bytes, EngineError>,
+    },
 }
 
 /// Events the engine pushes up to its owner. `MainScreen` is the coordinator
@@ -81,15 +83,25 @@ pub struct NowPlaying {
     pub volume: f32,
 }
 
-/// Errors surfaced by the engine.
-#[derive(Debug, thiserror::Error)]
+/// Errors surfaced by the engine. Clone so [`EngineMsg::BytesReady`] can ride
+/// iced's `Msg: Clone` bound (`std::io::Error` is not Clone).
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum EngineError {
     #[error("{0}")]
-    Library(#[from] crate::library::LibraryError),
+    Library(String),
+    #[error("decode: {0}")]
+    Decode(String),
 }
 
-/// The engine itself. An enum wrapper so `MainScreen` keeps on the same seam.
-#[derive(Debug, Clone)]
+impl From<crate::library::LibraryError> for EngineError {
+    fn from(err: crate::library::LibraryError) -> Self {
+        Self::Library(err.to_string())
+    }
+}
+
+/// The engine itself. Not `Clone`: the real variant owns a `!Send` device
+/// sink. iced does not require `Clone` on screen state.
+#[derive(Debug)]
 pub enum Engine {
     Mock(mock::MockEngine),
     Real(real::RealEngine),
@@ -100,8 +112,8 @@ impl Engine {
         Self::Mock(mock::MockEngine::new())
     }
 
-    pub fn real(manager: std::sync::Arc<crate::library::Manager>) -> Self {
-        Self::Real(real::RealEngine::new(manager))
+    pub fn real(manager: Arc<Manager>) -> Self {
+        Self::Real(real::RealEngine::open(manager))
     }
 
     /// Route a UI command into the engine. The returned
@@ -113,8 +125,9 @@ impl Engine {
         }
     }
 
-    /// Called by `MainScreen` on each tick. Returns events to push to the UI.
-    pub fn tick(&mut self) -> Vec<EngineEvent> {
+    /// Called by `MainScreen` on each tick. Events are pushed to the UI;
+    /// the task (if any) is a fetch kicked off by auto-advance.
+    pub fn tick(&mut self) -> (Vec<EngineEvent>, Task<EngineMsg>) {
         match self {
             Engine::Mock(engine) => engine.tick(),
             Engine::Real(engine) => engine.tick(),

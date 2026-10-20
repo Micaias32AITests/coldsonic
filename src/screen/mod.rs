@@ -23,7 +23,7 @@ const COVER_DISPLAY: f32 = 48.0;
 /// offline store returns art as stored, a networked provider downsizes).
 const COVER_PX: u32 = 96;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MainScreen {
     manager: Arc<Manager>,
     current_screen: SubScreen,
@@ -78,9 +78,9 @@ impl Screen for MainScreen {
         let task = action.handle(Msg::ArtistsScreenMsg, |_event| Task::none());
         (
             Self {
+                engine: Engine::real(manager.clone()),
                 manager,
                 current_screen: SubScreen::Artists(state),
-                engine: Engine::mock(),
                 now_playing: None,
                 cover: None,
                 seeking: None,
@@ -126,13 +126,13 @@ impl Screen for MainScreen {
             }
             Msg::EngineEvent(event) => self.apply_engine_event(event),
             Msg::Tick => {
-                let tasks: Vec<Task<Msg>> = self
-                    .engine
-                    .tick()
+                let (events, engine_task) = self.engine.tick();
+                let mut tasks: Vec<Task<Msg>> = events
                     .into_iter()
                     .map(|event| self.apply_engine_event(event))
                     .map(|action| action.handle(|msg| msg, |_| Task::none()))
                     .collect();
+                tasks.push(engine_task.map(Msg::Engine));
                 Action::task(Task::batch(tasks))
             }
             // Ignore stale results: only the current track's cover is shown,

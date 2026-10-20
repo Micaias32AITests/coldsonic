@@ -79,9 +79,7 @@ impl OfflineLibrary {
     pub async fn track_bytes(&self, id: &TrackId) -> Result<Bytes, LibraryError> {
         let rel = id.as_str();
         let path = self.root.join(rel);
-        let data = smol::fs::read(&path)
-            .await
-            .map_err(LibraryError::Io)?;
+        let data = smol::fs::read(&path).await.map_err(LibraryError::Io)?;
         Ok(Bytes::from(data))
     }
 }

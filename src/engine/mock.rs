@@ -8,6 +8,8 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
+use iced::Task;
+
 use crate::Action;
 
 use super::{EngineEvent, EngineMsg, NowPlaying, PlaybackState, Track};
@@ -174,12 +176,11 @@ impl MockEngine {
                 self.pending.push_back(EngineEvent::SeekDone);
             }
             EngineMsg::BytesReady { .. } => {}
-
         }
         self.next_emit()
     }
 
-    pub fn tick(&mut self) -> Vec<EngineEvent> {
+    pub fn tick(&mut self) -> (Vec<EngineEvent>, Task<EngineMsg>) {
         let mut events: Vec<EngineEvent> = self.pending.drain(..).collect();
 
         if self.state == PlaybackState::Playing {
@@ -196,7 +197,7 @@ impl MockEngine {
             }
         }
 
-        events
+        (events, Task::none())
     }
 
     pub fn now_playing(&self) -> Option<NowPlaying> {
@@ -238,4 +239,3 @@ impl MockEngine {
         }
     }
 }
-

@@ -1,3 +1,7 @@
+// TODO(ui_01 phase 4): implement `Screen` for `State` (init/update/view),
+// reusing the now-playing bar components. Held by the right panel.
+// Placeholder screen until then.
+
 use crate::prelude::*;
 
 #[derive(Debug, Clone)]

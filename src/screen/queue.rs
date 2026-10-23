@@ -1,3 +1,7 @@
+// TODO(ui_01 phase 4): implement `Screen` for `State` (init/update/view) and
+// render the engine queue. Held by the right panel, not the navigation stack.
+// Placeholder screen until then.
+
 use crate::prelude::*;
 
 #[derive(Debug, Clone)]

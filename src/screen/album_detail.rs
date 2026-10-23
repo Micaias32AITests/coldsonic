@@ -1,3 +1,7 @@
+// TODO(ui_01 phase 3): implement `Screen` for `State` (init/update/view),
+// following the `artists.rs` idiom, and hold it in `MainScreen`'s `SubScreen`
+// enum. Placeholder screen until then.
+
 use crate::prelude::*;
 
 #[derive(Debug, Clone)]

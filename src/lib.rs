@@ -1,10 +1,11 @@
-use iced::Subscription;
+use iced::{Subscription, Task};
 
 pub mod config;
 pub mod engine;
 pub mod library;
 pub mod prelude;
 pub mod screen;
+pub mod widget;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Never {}
@@ -60,6 +61,15 @@ impl<T, U> Action<T, U> {
 
     pub fn map<V, W>(self, mapper: impl Fn(Self) -> Action<V, W>) -> Action<V, W> {
         mapper(self)
+    }
+}
+
+impl<T> Action<T, Never> {
+    pub fn to_task(self) -> Task<T> {
+        match self {
+            Self::None => Task::none(),
+            Self::Task(t) => t,
+        }
     }
 }
 

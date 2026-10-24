@@ -3,14 +3,26 @@ use std::time::Duration;
 use bytes::Bytes;
 use iced::Subscription;
 use iced::futures::{SinkExt, Stream};
+use iced::widget::pane_grid;
 use iced_fonts::lucide;
 
-use crate::engine::{self, Engine, EngineEvent, EngineMsg};
-use crate::library::{ArtistId, CoverId, Manager};
-use crate::prelude::*;
+#[cfg(feature = "dev")]
+pub mod debug;
 
+use crate::config::{self, PanelScreenConfig, PanelStartup, UiSettings};
+use crate::engine::{self, Engine, EngineEvent, EngineMsg};
+use crate::library::{AlbumId, ArtistId, CoverId, Manager};
+use crate::prelude::*;
+use crate::widget::stack::{StackEntry, stack};
+
+pub mod album_detail;
+pub mod artist_detail;
 pub mod artists;
 pub mod library_setup;
+pub mod now_playing_panel;
+pub mod queue;
+pub mod settings;
+pub mod sidebar;
 
 /// Engine tick period — fast enough to notice track-end within ~1/4 s and keep
 /// the bar smooth.
@@ -23,10 +35,49 @@ const COVER_DISPLAY: f32 = 48.0;
 /// offline store returns art as stored, a networked provider downsizes).
 const COVER_PX: u32 = 96;
 
+/// Minimum fraction of the window the sidebar may occupy.
+const SIDEBAR_MIN_RATIO: f32 = 0.05;
+
+/// Minimum fraction of the window the right panel may occupy when reopened.
+const PANEL_MIN_RATIO: f32 = 0.08;
+
+/// Dragging the panel split past this point is equivalent to closing the panel.
+const PANEL_COLLAPSE_RATIO: f32 = 0.985;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route {
+    Artists,
+    ArtistDetail(ArtistId),
+    AlbumDetail(AlbumId),
+    Albums,
+    AllTracks,
+    Playlists,
+    Settings,
+}
+
+/// Screen data owned by the coordinator. One variant per screen; the `State`
+/// lives here (not in the `Stack` widget) and is popped together with its
+/// entry, so back-navigation restores exactly what was left behind.
+#[derive(Debug)]
+pub enum SubScreen {
+    Artists(artists::State),
+    ArtistDetail(ArtistId),
+    AlbumDetail(AlbumId),
+    Albums,
+    AllTracks,
+    Playlists,
+    Settings,
+}
+
+#[derive(Debug)]
+pub struct ScreenEntry {
+    route: Route,
+    screen: SubScreen,
+}
+
 #[derive(Debug)]
 pub struct MainScreen {
     manager: Arc<Manager>,
-    current_screen: SubScreen,
     engine: Engine,
     /// Snapshot pushed by the engine; the bar renders from this.
     now_playing: Option<engine::NowPlaying>,
@@ -38,11 +89,123 @@ pub struct MainScreen {
     seeking: Option<f32>,
     /// Volume restored by the mute toggle, default `1.0`.
     last_volume: f32,
+    // --- Navigation (region 02) -----------------------------------------
+    entries: Vec<StackEntry<ScreenEntry>>,
+    next_route_id: u64,
+    // --- Layout (regions 01–03) -----------------------------------------
+    panes: Panes,
+    ui_settings: UiSettings,
+    settings_dirty: bool,
+    panel_open: bool,
+    panel_screen: PanelScreen,
 }
 
-#[derive(Debug, Clone)]
-pub enum SubScreen {
-    Artists(artists::State),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Region {
+    Sidebar,
+    Content,
+    Panel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelScreen {
+    Queue,
+    NowPlaying,
+}
+
+impl From<PanelScreenConfig> for PanelScreen {
+    fn from(value: PanelScreenConfig) -> Self {
+        match value {
+            PanelScreenConfig::Queue => PanelScreen::Queue,
+            PanelScreenConfig::NowPlaying => PanelScreen::NowPlaying,
+        }
+    }
+}
+
+impl From<PanelScreen> for PanelScreenConfig {
+    fn from(value: PanelScreen) -> Self {
+        match value {
+            PanelScreen::Queue => PanelScreenConfig::Queue,
+            PanelScreen::NowPlaying => PanelScreenConfig::NowPlaying,
+        }
+    }
+}
+
+/// The pane-grid layout: sidebar | content | optional panel.
+///
+/// `split` ids are retained so resize events can be attributed to the ratio
+/// they actually belong to.
+#[derive(Debug)]
+struct Panes {
+    state: pane_grid::State<Region>,
+    content: pane_grid::Pane,
+    sidebar_split: pane_grid::Split,
+    panel_split: Option<pane_grid::Split>,
+    panel_pane: Option<pane_grid::Pane>,
+    /// Inner ratio of the content/panel split (not normalized to the window).
+    panel_inner_ratio: f32,
+}
+
+impl Panes {
+    fn build(settings: &UiSettings, panel_open: bool) -> Self {
+        let (mut state, sidebar) = pane_grid::State::new(Region::Sidebar);
+        let (content, sidebar_split) = state
+            .split(pane_grid::Axis::Vertical, sidebar, Region::Content)
+            .expect("splitting the root pane yields a new pane");
+
+        let sidebar_ratio = settings.sidebar_ratio.clamp(SIDEBAR_MIN_RATIO, 0.5);
+        state.resize(sidebar_split, sidebar_ratio);
+
+        let mut panes = Self {
+            state,
+            content,
+            sidebar_split,
+            panel_split: None,
+            panel_pane: None,
+            panel_inner_ratio: 0.5,
+        };
+        if panel_open {
+            panes.open_panel(sidebar_ratio, settings.panel_ratio);
+        }
+        panes
+    }
+
+    fn open_panel(&mut self, sidebar_ratio: f32, panel_ratio: f32) {
+        if self.panel_split.is_some() {
+            return;
+        }
+        if let Some((panel, split)) =
+            self.state
+                .split(pane_grid::Axis::Vertical, self.content, Region::Panel)
+        {
+            let inner = panel_inner_ratio(sidebar_ratio, panel_ratio);
+            self.state.resize(split, inner);
+            self.panel_split = Some(split);
+            self.panel_pane = Some(panel);
+            self.panel_inner_ratio = inner;
+        }
+    }
+
+    fn close_panel(&mut self) {
+        let Some(panel) = self.panel_pane.take() else {
+            return;
+        };
+        if self.state.close(panel).is_some() {
+            self.panel_split = None;
+        }
+    }
+}
+
+/// Converts a desired panel fraction of the whole window into the ratio of the
+/// inner content/panel split (`0.0..=1.0`).
+fn panel_inner_ratio(sidebar_ratio: f32, panel_fraction: f32) -> f32 {
+    let remaining = (1.0 - sidebar_ratio).max(0.01);
+    (1.0 - panel_fraction / remaining).clamp(0.05, 0.95)
+}
+
+/// Inverse of [`panel_inner_ratio`].
+fn panel_fraction(sidebar_ratio: f32, inner_ratio: f32) -> f32 {
+    (1.0 - sidebar_ratio) * (1.0 - inner_ratio)
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +223,17 @@ pub enum Msg {
     SeekDragged(f32),
     /// The seek slider was released — commits the draft seek to the engine.
     SeekReleased,
+    /// A pane divider was dragged.
+    PaneResized(pane_grid::ResizeEvent),
+    Sidebar(sidebar::Msg),
+    /// Toggle the right panel (region 03).
+    TogglePanel,
+    /// Switch what the right panel shows.
+    SwitchPanel(PanelScreen),
+    /// Pop one entry off the navigation stack (`Alt+Left`).
+    Back,
+    /// Keyboard events (only `Alt+Left` is acted upon).
+    Keyboard(iced::keyboard::Event),
 }
 
 impl Screen for MainScreen {
@@ -74,17 +248,41 @@ impl Screen for MainScreen {
         Self: Sized,
     {
         let manager = data;
-        let (state, action) = artists::State::init(manager.clone());
+        let ui_settings = config::load_ui_settings();
+        let panel_open = match ui_settings.panel_startup {
+            PanelStartup::PersistState => ui_settings.panel_open,
+            PanelStartup::StartClosed => false,
+            PanelStartup::StartOpened => true,
+        };
+        let panel_screen = PanelScreen::from(ui_settings.panel_screen.clone());
+        let panes = Panes::build(&ui_settings, panel_open);
+
+        let (artists_state, action) = artists::State::init(manager.clone());
         let task = action.handle(Msg::ArtistsScreenMsg, |_event| Task::none());
+
+        let entries = vec![StackEntry::new(
+            0,
+            ScreenEntry {
+                route: Route::Artists,
+                screen: SubScreen::Artists(artists_state),
+            },
+        )];
+
         (
             Self {
                 engine: Engine::real(manager.clone()),
                 manager,
-                current_screen: SubScreen::Artists(state),
                 now_playing: None,
                 cover: None,
                 seeking: None,
                 last_volume: 1.0,
+                entries,
+                next_route_id: 1,
+                panes,
+                ui_settings,
+                settings_dirty: false,
+                panel_open,
+                panel_screen,
             },
             Action::task(task),
         )
@@ -93,7 +291,12 @@ impl Screen for MainScreen {
     fn update(&mut self, msg: Self::Msg) -> Action<Self::Msg, Self::Emit> {
         match msg {
             Msg::ArtistsScreenMsg(inner) => {
-                let SubScreen::Artists(screen) = &mut self.current_screen;
+                let Some(entry) = self.entries.last_mut() else {
+                    return Action::none();
+                };
+                let SubScreen::Artists(screen) = &mut entry.value.screen else {
+                    return Action::none();
+                };
                 let manager = self.manager.clone();
                 let task = screen
                     .update(inner)
@@ -133,6 +336,13 @@ impl Screen for MainScreen {
                     .map(|action| action.handle(|msg| msg, |_| Task::none()))
                     .collect();
                 tasks.push(engine_task.map(Msg::Engine));
+
+                // Debounced settings write: at most once per engine tick while
+                // a divider is being dragged.
+                if self.settings_dirty {
+                    self.save_settings();
+                }
+
                 Action::task(Task::batch(tasks))
             }
             // Ignore stale results: only the current track's cover is shown,
@@ -163,26 +373,241 @@ impl Screen for MainScreen {
                     Duration::from_secs_f32(position),
                 ))))
             }
+            Msg::PaneResized(event) => {
+                self.panes.state.resize(event.split, event.ratio);
+
+                if event.split == self.panes.sidebar_split {
+                    self.ui_settings.sidebar_ratio = event.ratio;
+                    if self.panel_split().is_some() {
+                        self.ui_settings.panel_ratio =
+                            panel_fraction(event.ratio, self.panes.panel_inner_ratio);
+                    }
+                    self.settings_dirty = true;
+                } else if Some(event.split) == self.panel_split() {
+                    if event.ratio >= PANEL_COLLAPSE_RATIO {
+                        // Dragging the panel to zero is the same as the toggle.
+                        self.panel_open = false;
+                        self.ui_settings.panel_open = false;
+                        self.panes.close_panel();
+                        self.save_settings();
+                    } else {
+                        self.panes.panel_inner_ratio = event.ratio;
+                        self.ui_settings.panel_ratio =
+                            panel_fraction(self.ui_settings.sidebar_ratio, event.ratio);
+                        self.settings_dirty = true;
+                    }
+                }
+                Action::none()
+            }
+            Msg::Sidebar(sidebar_msg) => self.handle_sidebar(sidebar_msg),
+            Msg::TogglePanel => {
+                self.panel_open = !self.panel_open;
+                self.ui_settings.panel_open = self.panel_open;
+                if self.panel_open {
+                    self.panes.open_panel(
+                        self.ui_settings.sidebar_ratio,
+                        self.ui_settings.panel_ratio.max(PANEL_MIN_RATIO),
+                    );
+                } else {
+                    self.panes.close_panel();
+                }
+                self.save_settings();
+                Action::none()
+            }
+            Msg::SwitchPanel(screen) => {
+                self.panel_screen = screen;
+                self.ui_settings.panel_screen = PanelScreenConfig::from(screen);
+                self.save_settings();
+                Action::none()
+            }
+            Msg::Back => {
+                // The root entry is never popped: back from a root is a no-op.
+                if self.entries.len() > 1 {
+                    self.entries.pop();
+                }
+                Action::none()
+            }
+            Msg::Keyboard(event) => {
+                let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
+                    return Action::none();
+                };
+                let back = modifiers.alt()
+                    && key == iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowLeft);
+                if back && self.entries.len() > 1 {
+                    self.entries.pop();
+                }
+                Action::none()
+            }
         }
     }
 
     fn view(&self) -> Element<'_, Self::Msg> {
-        widget::column![self.view_subscreen(), self.view_now_playing()]
+        let content = pane_grid(&self.panes.state, |_, pane_state, _is_maximized| {
+            let content: Element<'_, Msg> = match pane_state {
+                Region::Sidebar => sidebar::view(Msg::Sidebar),
+                Region::Content => self.view_stack(),
+                Region::Panel => self.view_panel(),
+            };
+            pane_grid::Content::new(content)
+        })
+        .on_resize(6.0, Msg::PaneResized)
+        .width(Fill)
+        .height(Fill);
+
+        widget::column![content, self.view_now_playing()]
             .width(Fill)
             .height(Fill)
             .into()
     }
 
     fn subscription(&self) -> Subscription<Self::Msg> {
-        Subscription::run(tick_stream)
+        Subscription::batch([
+            Subscription::run(tick_stream),
+            iced::keyboard::listen().map(Msg::Keyboard),
+        ])
     }
 }
 
 impl MainScreen {
-    fn view_subscreen(&self) -> Element<'_, Msg> {
-        match &self.current_screen {
-            SubScreen::Artists(screen) => screen.view().map(Msg::ArtistsScreenMsg),
+    fn panel_split(&self) -> Option<pane_grid::Split> {
+        self.panes.panel_split
+    }
+
+    fn save_settings(&mut self) {
+        if let Err(err) = config::save_ui_settings(&self.ui_settings) {
+            warn!(%err, "failed to save settings.toml");
         }
+        self.settings_dirty = false;
+    }
+
+    fn alloc_route_id(&mut self) -> u64 {
+        let id = self.next_route_id;
+        self.next_route_id += 1;
+        id
+    }
+
+    fn make_screen(&self, route: &Route) -> (SubScreen, Task<Msg>) {
+        match route {
+            Route::Artists => {
+                let (state, action) = artists::State::init(self.manager.clone());
+                let task = action.handle(Msg::ArtistsScreenMsg, |_event| Task::none());
+                (SubScreen::Artists(state), task)
+            }
+            Route::ArtistDetail(id) => (SubScreen::ArtistDetail(id.clone()), Task::none()),
+            Route::AlbumDetail(id) => (SubScreen::AlbumDetail(id.clone()), Task::none()),
+            Route::Albums => (SubScreen::Albums, Task::none()),
+            Route::AllTracks => (SubScreen::AllTracks, Task::none()),
+            Route::Playlists => (SubScreen::Playlists, Task::none()),
+            Route::Settings => (SubScreen::Settings, Task::none()),
+        }
+    }
+
+    fn push_route(&mut self, route: Route) -> Task<Msg> {
+        let (screen, task) = self.make_screen(&route);
+        let id = self.alloc_route_id();
+        self.entries
+            .push(StackEntry::new(id, ScreenEntry { route, screen }));
+        task
+    }
+
+    /// Main-section click: clear the stack and show that section's root.
+    /// Re-clicking the current section's button truncates back to its root,
+    /// keeping the surviving entry's state.
+    fn goto_root(&mut self, route: Route) -> Task<Msg> {
+        let is_root = self
+            .entries
+            .first()
+            .is_some_and(|entry| entry.value.route == route);
+
+        if is_root {
+            self.entries.truncate(1);
+            return Task::none();
+        }
+
+        self.entries.clear();
+        self.push_route(route)
+    }
+
+    fn handle_sidebar(&mut self, msg: sidebar::Msg) -> Action<Msg, Never> {
+        let task = match msg {
+            sidebar::Msg::Artists => self.goto_root(Route::Artists),
+            sidebar::Msg::Albums => self.goto_root(Route::Albums),
+            sidebar::Msg::Tracks => self.goto_root(Route::AllTracks),
+            sidebar::Msg::Playlists => self.goto_root(Route::Playlists),
+            sidebar::Msg::Settings => {
+                // Settings never clears the stack; it is pushed on top of the
+                // current route. Re-clicking resets the existing settings
+                // screen instead of nesting another copy.
+                if let Some(entry) = self
+                    .entries
+                    .iter_mut()
+                    .find(|entry| entry.value.route == Route::Settings)
+                {
+                    entry.value.screen = SubScreen::Settings;
+                    Task::none()
+                } else {
+                    self.push_route(Route::Settings)
+                }
+            }
+        };
+
+        Action::task(task)
+    }
+
+    fn view_stack<'a>(&'a self) -> Element<'a, Msg> {
+        stack(&self.entries, |entry: &'a ScreenEntry| {
+            self.view_route(entry)
+        })
+        .into()
+    }
+
+    fn view_route<'a>(&'a self, entry: &'a ScreenEntry) -> Element<'a, Msg> {
+        match &entry.screen {
+            SubScreen::Artists(screen) => screen.view().map(Msg::ArtistsScreenMsg),
+            SubScreen::ArtistDetail(id) => placeholder(format!("Artist {}", id.as_str())),
+            SubScreen::AlbumDetail(id) => placeholder(format!("Album {}", id.as_str())),
+            SubScreen::Albums => placeholder("Albums"),
+            SubScreen::AllTracks => placeholder("Tracks"),
+            SubScreen::Playlists => placeholder("Playlists"),
+            SubScreen::Settings => placeholder("Settings"),
+        }
+    }
+
+    fn view_panel(&self) -> Element<'_, Msg> {
+        if !self.panel_open {
+            return widget::container(widget::column![]).into();
+        }
+
+        let tabs = widget::row![
+            button(text("Queue"))
+                .on_press(Msg::SwitchPanel(PanelScreen::Queue))
+                .style(panel_tab_style(self.panel_screen == PanelScreen::Queue)),
+            button(text("Now playing"))
+                .on_press(Msg::SwitchPanel(PanelScreen::NowPlaying))
+                .style(panel_tab_style(
+                    self.panel_screen == PanelScreen::NowPlaying
+                )),
+        ]
+        .spacing(4);
+
+        let body: Element<'_, Msg> = match self.panel_screen {
+            PanelScreen::Queue => placeholder("Queue"),
+            PanelScreen::NowPlaying => placeholder("Now playing"),
+        };
+
+        widget::column![
+            widget::row![
+                tabs,
+                widget::space::horizontal(),
+                button(text("Hide")).on_press(Msg::TogglePanel)
+            ]
+            .spacing(4),
+            body,
+        ]
+        .spacing(8)
+        .padding(8)
+        .height(Fill)
+        .into()
     }
 
     fn view_now_playing(&self) -> Element<'_, Msg> {
@@ -262,7 +687,7 @@ impl MainScreen {
             .align_x(Center)
             .spacing(8);
 
-        // --- Right: mute toggle + volume -------------------------------------
+        // --- Right: mute toggle + volume + panel toggle ----------------------
         let volume = np.map(|n| n.volume).unwrap_or(1.0);
         let muted = volume <= 0.0;
         let mute_button = button(if muted {
@@ -278,7 +703,13 @@ impl MainScreen {
         let volume_slider = slider(0.0..=1.0, volume, |v| Msg::Engine(EngineMsg::SetVolume(v)))
             .step(0.01_f32)
             .width(100);
-        let right = row![mute_button, volume_slider].align_y(Center).spacing(8);
+        let right = row![
+            mute_button,
+            volume_slider,
+            button(text("Panel")).on_press(Msg::TogglePanel)
+        ]
+        .align_y(Center)
+        .spacing(8);
 
         row![left, center, right]
             .align_y(Center)
@@ -326,6 +757,33 @@ impl MainScreen {
 
         self.now_playing = self.engine.now_playing();
         Action::task(task)
+    }
+}
+
+fn placeholder(title: impl Into<String>) -> Element<'static, Msg> {
+    container(text(title.into()).size(16))
+        .padding(16)
+        .width(Fill)
+        .height(Fill)
+        .into()
+}
+
+fn panel_tab_style(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, _status| {
+        let palette = theme.extended_palette();
+        button::Style {
+            background: if active {
+                Some(palette.primary.weak.color.into())
+            } else {
+                None
+            },
+            text_color: if active {
+                palette.primary.weak.text
+            } else {
+                palette.background.base.text
+            },
+            ..button::Style::default()
+        }
     }
 }
 

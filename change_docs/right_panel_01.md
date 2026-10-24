@@ -13,13 +13,14 @@ Applies to: `src/engine/mod.rs`, `src/engine/mock.rs`, `src/engine/real.rs`,
 Fill the right panel slot with two real screens:
 
 - **Queue**: a read-only view of the engine's upcoming tracks.
-- **Now-playing details**: a larger player view for the current track,
-  reusing the bottom bar's cover/transport/progress/volume pieces.
+- **Now-playing details**: a larger, read-only view of the current track
+  (art and metadata). Playback controls stay in the bottom bar.
 
 The panel slot itself (region 03), its toggle, width persistence, startup
 precedence, and screen selection were implemented in `ui_01.md` phases 1–2.
 This plan covers the screens, their data flow, and the engine work needed to
-feed them. **Their visual design is not decided yet** — see §8.
+feed them. The now-playing layout is settled in §8.1; the queue layout is
+still open (§8.2).
 
 ## 1. Locked-in decisions
 
@@ -43,6 +44,9 @@ feed them. **Their visual design is not decided yet** — see §8.
 - **Queue is read-only for now.** No remove/reorder/play-row actions in this
   plan; adding them later means new `EngineMsg`s and queue `Emit` variants,
   not a rewrite.
+- **The now-playing panel is details-only.** No transport, seek, or volume
+  controls; those live in the bar. Its state needs no seek draft and no
+  volume memory.
 
 ## 2. Snapshot model
 
@@ -142,8 +146,9 @@ seeking: Option<f32>,        // bar's own draft, already exists
   screens' sync tasks.
 - `view_panel`: match `panel_screen` and call the corresponding `Screen::view`.
   The panel header (tabs, Hide) stays in `MainScreen` for now.
-- Panel intents are handled by a helper that maps each screen's `Emit` to the
-  existing `Msg::Engine(...)` variants.
+- Neither panel screen has intents yet (`Emit` is empty). When row actions or
+  other controls land, a helper maps each screen's `Emit` to the existing
+  `Msg::Engine(...)` variants.
 
 `PlayerSnapshot` lives in `src/screen/mod.rs` initially; move it to its own
 module only if it grows.
@@ -185,25 +190,14 @@ pub struct State {
     cover: Option<image::Handle>,
     /// Cover id `cover` belongs to, for stale-result filtering.
     cover_id: Option<CoverId>,
-    /// This control's own seek draft.
-    seeking: Option<f32>,
 }
 
 pub enum Msg {
     Sync(Arc<PlayerSnapshot>),
     CoverLoaded(CoverId, Result<Bytes, ()>),
-    SeekDragged(f32),
-    SeekReleased,
 }
 
-pub enum Event {
-    Seek(f32),
-    PlayPause,
-    Next,
-    Prev,
-    Stop,
-    SetVolume(f32),
-}
+pub enum Event {} // details-only: no transport/seek/volume intents
 
 pub struct Init {
     pub manager: Arc<Manager>,
@@ -212,69 +206,112 @@ pub struct Init {
 ```
 
 - On `Sync`, store the snapshot. If `now_playing.track.cover` differs from
-  `cover_id`, clear the handle and spawn a fetch task at the panel's own
-  resolution. Ignore `CoverLoaded` for a stale id.
-- `SeekDragged` stores the draft; `SeekReleased` takes it and emits
-  `Event::Seek`. The engine remains the only writer of authoritative
-  position; after `SeekDone`/the next tick the snapshot updates both sliders.
-- Volume slider emits `Event::SetVolume` continuously (harmless). The mute
-  toggle needs remembered non-zero volume; keep that memory in the panel (or
-  coordinator) as a UI-only value — do not put it in `PlayerSnapshot`.
-- Transport/progress/volume/cover **components are extracted** from
-  `MainScreen::view_now_playing` into reusable view functions so the bar and
-  the panel build the same rows. Their exact API (props struct, size/
-  compactness flags) is decided with the visual design.
+  `cover_id`, clear the handle and spawn a fetch task. Ignore `CoverLoaded`
+  for a stale id.
+- **Fetch size**: request 2048 px from `Manager::cover`. Offline providers
+  ignore the px and return the stored art; network providers may honour it.
+  iced downscales for display.
+- **Display size** is 80% of the panel body's width, square, computed with
+  `responsive` — `FillPortion` cannot set a child's width. If the panel is
+  wide relative to its height the cover can crowd the metadata; cap it by
+  height if that shows up in practice.
+- **No shared widgets with the bar.** The bar's compact cover/transport/
+  progress/volume rows stay in `MainScreen`; the panel is a distinct
+  full-size view.
+- **No seek draft.** The bar remains the only seek control. The earlier
+  panel draft's `SeekDragged`/`SeekReleased` messages and `Event` variants
+  are removed.
 - The bar keeps its own `cover`, `CoverLoaded`, `seeking`, and fetch path in
   `MainScreen`; it is chrome, not a screen.
 
 ### Cover ownership and duplicate fetches
 
-The bar fetches ~96 px for a 48 px display. The panel fetches its own handle
-at its own resolution (value TBD). The same track may therefore be fetched
-twice, at different sizes; iced caches the handles independently. This is
-accepted: a shared cache would move handles back into the coordinator and
-break the ownership rule.
+The bar fetches ~96 px for a 48 px display. The panel fetches 2048 px for a
+large display. The same track is therefore fetched twice at different sizes;
+iced caches the handles independently. This is accepted: a shared cache would
+move handles back into the coordinator and break the ownership rule.
 
 Open question: gate the panel fetch on visibility (only fetch when the panel
 shows Now-playing) or fetch on every track change even while hidden. Default
-proposal: fetch always, matching the bar; add gating only if it matters.
+proposal: fetch always, matching the bar; add gating only if the 2048 px
+texture while hidden matters.
 
 ## 7. Retention
 
 - **Data**: retained because both screen states live in `MainScreen`, are kept
   synced while hidden, and are never recreated by toggling.
 - **Cover handle**: retained with `now_playing_panel::State`.
-- **Scroll position**: **not yet solved.** Closing the panel currently calls
-  `pane_grid::State::close`, which drops the panel's widget `Tree`. Two options
-  once the visual design exists:
+- **Scroll position**: still relevant for the queue list once its layout is
+  decided. Closing the panel currently calls `pane_grid::State::close`, which
+  drops the panel's widget `Tree`. Two options:
   1. keep the panel pane mounted at zero width and treat `panel_open` as a
      ratio threshold (retains trees naturally);
   2. keep the current close/reopen and mirror scroll offsets in screen state
      via `scrollable::Id` + `snap_to` on activation.
   The plan assumes (1) unless it fights `pane_grid`; validate before deciding.
 
-## 8. Visual design — deliberately undecided
+## 8. Visual design
 
-Do not implement the layout until these are settled. The architectural work
-(§2–§7) can land first with the current placeholders still rendering.
+### 8.1 Now-playing (decided)
+
+```
+┌────────────────────────────────────┐
+│ [Queue] [Now playing]       [Hide] │
+├────────────────────────────────────┤
+│                                    │
+│      ┌──────────────────────┐      │
+│      │                      │      │
+│      │                      │      │
+│      │        COVER         │      │  width = 80% of body,
+│      │                      │      │  height = same (square)
+│      │                      │      │
+│      └──────────────────────┘      │
+│                                    │
+│            Track title             │
+│            Album                   │
+│            Artist                  │
+│            04:12                   │
+│                                    │
+│                                    │
+│         (Space::new())             │  ← future visualizer
+│                                    │
+└────────────────────────────────────┘
+```
+
+- Everything is horizontally centered.
+- Metadata order is **title, album, artist, duration**. Duration reuses
+  `fmt_duration` (`04:12`).
+- **No year.** `library::Track` does not carry one, and adding it is deferred.
+  The album line is just the album name, with no dangling separator.
+- No transport, progress, or volume controls; those stay in the bottom bar.
+- Below the metadata, add `Space::new()` (Shrink × Shrink) with a
+  `// future: visualizer` comment. It reserves no space now and is the seam
+  for a future visualizer (algorithm out of scope).
+- **Cover**: square, 80% of the panel body width, computed with `responsive`.
+  Fetch at 2048 px and let iced downscale.
+- **Empty state**: replace the cover with `lucide::music()` at
+  `size(cover_side)` in the muted color, centered, with
+  `"No music currently playing"` below it. Omit the metadata lines.
+- **Loading placeholder**: the same muted icon at a smaller size, as in the
+  bar.
+- The panel header (tabs + Hide) stays as implemented.
+
+### 8.2 Queue (undecided)
+
+Do not implement the queue layout until these are settled. The architecture
+(§2–§7) can land first with the current placeholder still rendering.
 
 Open questions:
 
-- **Panel width**: current default is 20% of the window; is that enough for a
-  now-playing view?
 - **Queue rows**: title only, title + artist, duration, track number? Covers
   per row (implies per-row handles and fetches) or text-only?
 - **Queue header**: "Up next" only, or also show the current track at the top
   highlighted as "Now playing"?
 - **Queue length**: show upcoming only (engine queue) — confirmed for this
   plan — but should the current track be pinned above it?
-- **Now-playing layout**: large cover size and placement; title/artist/album
-  lines; where transport, progress, and volume sit vertically.
-- **Component API**: do the bar pieces take a `compact: bool`, explicit sizes,
-  or separate compact/full builders?
-- **Cover sizes**: display size and fetch size (2× for HiDPI) for the panel.
-- **Empty states**: no track playing, empty queue.
-- **Panel header**: keep tabs + Hide, or move the toggle to the bar only?
+- **Empty state**: what the queue shows when there is nothing upcoming.
+- **Scroll**: the retention approach in §7 depends on whether the list uses
+  `scrollable`.
 
 ## 9. Implementation order
 
@@ -283,8 +320,8 @@ Open questions:
 2. **Coordinator plumbing**: `PlayerSnapshot`, `MainScreen` fields, rebuild +
    fan-out, both screen states created and synced; views stay placeholders.
 3. **Queue screen**: `Screen` impl + read-only view using `snapshot.queue`.
-4. **Now-playing screen**: state/messages/emit, cover fetch, seek draft;
-   extract shared components; view per §8 once decided.
+4. **Now-playing screen**: state/messages, cover fetch, centered details view
+   per §8.1, empty/loading states. No transport/seek/volume wiring.
 5. **Retention**: validate the keep-pane-mounted approach; otherwise implement
    scroll mirroring.
 6. **Visibility gating** for cover fetches (only if needed).
@@ -298,8 +335,11 @@ Open questions:
 - Manual:
   - play an artist → open Queue → upcoming tracks match playback order;
   - Next/Prev/auto-advance update the queue within one tick;
-  - Now-playing shows the current track, transport works, seek drags without
-    the tick fighting the thumb, volume/mute work;
+  - Now-playing shows the current cover, title, album, artist, and duration,
+    centered; no year, transport, progress, or volume controls;
+  - changing tracks updates the panel cover; stale cover results are ignored;
+  - with nothing playing, the panel shows the scaled muted icon and
+    "No music currently playing";
   - switching Queue ↔ Now-playing and toggling the panel retains each
     screen's data (and scroll once §7 is decided);
   - panel startup/toggle persistence from `ui_01.md` still works.
@@ -309,7 +349,8 @@ Open questions:
 - Queue row actions (remove, reorder, play-from-queue). Requires new engine
   commands; the screen's `Event` is the seam.
 - Playback history view.
-- Lyrics, visualizer, equalizer.
+- Lyrics, visualizer (the `Space::new()` seam is reserved), equalizer.
+- Track year metadata (deferred; the now-playing panel omits year).
 - Drag-and-drop inside the panel (`ui_01.md` non-goals).
 - LazyList windowing: same blockage rule as `ui_01.md` §7 — if a queue is too
   large to render without it, stop and raise it.
@@ -322,5 +363,5 @@ Open questions:
 - `EngineEvent::QueueChanged` gains an `Arc<[Track]>` payload and is emitted
   from every path that mutates the queue.
 - `ViewCtx` on `Screen` was considered and rejected; `Screen` stays as it is.
-- Covers, seek drafts, and scroll are screen/control-owned, never snapshot
-  state.
+- Covers and scroll are screen-owned. The bar's seek draft stays in
+  `MainScreen`; the details-only panel has none.

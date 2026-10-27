@@ -12,15 +12,15 @@ iced = { version = "0.14.0", features = ["smol", "image", "advanced"] }
 iced_fonts = { version = "0.3", features = ["lucide"] }
 itertools = "0.15.0"
 lofty = "0.25"
-opensubsonic = "0.4.0"
+opensubsonic = "0.6.1"
 rand = "0.9"
-rodio = "0.22"
+rodio = "0.23"
 reqwest = "0.13.5"
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
 smol = "2.0.2"
 thiserror = "2.0.20"
-toml = "0.8"
+toml = "1.1.8+spec-1.1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

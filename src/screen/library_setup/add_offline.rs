@@ -71,18 +71,9 @@ impl State {
     }
 }
 
-impl Screen for State {
-    type Msg = Msg;
-
-    type Emit = Event;
-
-    type InitData = Vec<LibraryConfig>;
-
-    fn init(libraries: Self::InitData) -> (Self, Action<Self::Msg, Self::Emit>)
-    where
-        Self: Sized,
-    {
-        let state = Self {
+impl State {
+    pub fn init(libraries: Vec<LibraryConfig>) -> Self {
+        Self {
             libraries,
             name: String::new(),
             id: String::new(),
@@ -90,11 +81,10 @@ impl Screen for State {
             root: String::new(),
             scan: ScanMode::default(),
             error: None,
-        };
-        (state, Action::none())
+        }
     }
 
-    fn update(&mut self, msg: Self::Msg) -> Action<Self::Msg, Self::Emit> {
+    pub fn update(&mut self, msg: Msg) -> Action<Msg, Event> {
         match msg {
             Msg::Noop => Action::none(),
             Msg::NameEdit(value) => {
@@ -173,7 +163,7 @@ impl Screen for State {
         }
     }
 
-    fn view(&self) -> iced::Element<'_, Self::Msg> {
+    pub fn view(&self) -> iced::Element<'_, Msg> {
         let mut list = widget::column![
             text("Add Local Library").size(20),
             text_input("Name", &self.name).on_input(Msg::NameEdit),

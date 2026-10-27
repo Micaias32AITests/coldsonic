@@ -4,9 +4,10 @@ use iced_fonts::lucide;
 use crate::library::{Artist, ArtistId, CoverId, Manager};
 use crate::prelude::*;
 
+use super::Ctx;
+
 #[derive(Debug, Clone)]
 pub struct State {
-    manager: Arc<Manager>,
     rows: Vec<Row>,
     /// Distinguishes "still loading" from "loaded, nothing here".
     loaded: bool,
@@ -52,123 +53,111 @@ pub enum Event {
     PlayShuffled(ArtistId),
 }
 
-impl Screen for State {
-    type Msg = Msg;
-
-    type Emit = Event;
-
-    type InitData = Arc<Manager>;
-
-    fn init(manager: Self::InitData) -> (Self, Action<Self::Msg, Self::Emit>)
-    where
-        Self: Sized,
-    {
-        let manager_for_load = manager.clone();
-        (
-            Self {
-                manager,
-                rows: Vec::new(),
-                loaded: false,
+pub fn init(manager: Arc<Manager>) -> (State, Task<Msg>) {
+    let manager_for_load = manager.clone();
+    (
+        State {
+            rows: Vec::new(),
+            loaded: false,
+        },
+        Task::perform(
+            async move { manager_for_load.artists().await },
+            |res| match res {
+                Ok(artists) => Msg::ArtistsLoaded(artists),
+                Err(_) => Msg::ArtistsLoadFailed,
             },
-            Action::task(Task::perform(
-                async move { manager_for_load.artists().await },
-                |res| match res {
-                    Ok(artists) => Msg::ArtistsLoaded(artists),
-                    Err(_) => Msg::ArtistsLoadFailed,
-                },
-            )),
-        )
-    }
+        ),
+    )
+}
 
-    fn update(&mut self, msg: Self::Msg) -> Action<Self::Msg, Self::Emit> {
-        match msg {
-            Msg::ArtistsLoaded(artists) => {
-                let mut rows = Vec::with_capacity(artists.len());
-                let mut tasks = Vec::new();
-                for artist in artists.into_iter() {
-                    if let Some(cover) = artist.cover.clone() {
-                        let manager = self.manager.clone();
-                        let fetch_cover = cover.clone();
-                        tasks.push(Task::perform(
-                            async move { manager.cover(&fetch_cover, COVER_PX).await },
-                            move |res| Msg::CoverLoaded(cover, res.map_err(|_| ())),
-                        ));
-                        rows.push(Row {
-                            artist,
-                            cover: CoverState::Loading,
-                        });
-                    } else {
-                        rows.push(Row {
-                            artist,
-                            cover: CoverState::NotLoaded,
-                        });
-                    }
-                }
-                self.rows = rows;
-                self.loaded = true;
-                if tasks.is_empty() {
-                    Action::none()
+pub fn update(state: &mut State, ctx: Ctx<'_>, msg: Msg) -> Action<Msg, Event> {
+    match msg {
+        Msg::ArtistsLoaded(artists) => {
+            let mut rows = Vec::with_capacity(artists.len());
+            let mut tasks = Vec::new();
+            for artist in artists.into_iter() {
+                if let Some(cover) = artist.cover.clone() {
+                    let manager = ctx.manager.clone();
+                    let fetch_cover = cover.clone();
+                    tasks.push(Task::perform(
+                        async move { manager.cover(&fetch_cover, COVER_PX).await },
+                        move |res| Msg::CoverLoaded(cover, res.map_err(|_| ())),
+                    ));
+                    rows.push(Row {
+                        artist,
+                        cover: CoverState::Loading,
+                    });
                 } else {
-                    Action::task(Task::batch(tasks))
+                    rows.push(Row {
+                        artist,
+                        cover: CoverState::NotLoaded,
+                    });
                 }
             }
-            Msg::ArtistsLoadFailed => {
-                warn!("failed to load artists");
-                self.rows = Vec::new();
-                self.loaded = true;
+            state.rows = rows;
+            state.loaded = true;
+            if tasks.is_empty() {
                 Action::none()
+            } else {
+                Action::task(Task::batch(tasks))
             }
-            Msg::ArtistClicked(id) => {
-                debug!(id = %id.as_str(), "artist clicked");
-                Action::none()
-            }
-            Msg::CoverLoaded(id, result) => {
-                let Some(row) = self
-                    .rows
-                    .iter_mut()
-                    .find(|row| row.artist.cover.as_ref() == Some(&id))
-                else {
-                    return Action::none();
-                };
-                row.cover = match result {
-                    Ok(bytes) => CoverState::Loaded(image::Handle::from_bytes(bytes)),
-                    Err(_) => CoverState::Failed,
-                };
-                Action::none()
-            }
-            Msg::PlayShuffled(id) => Action::emit(Event::PlayShuffled(id)),
         }
+        Msg::ArtistsLoadFailed => {
+            warn!("failed to load artists");
+            state.rows = Vec::new();
+            state.loaded = true;
+            Action::none()
+        }
+        Msg::ArtistClicked(id) => {
+            debug!(id = %id.as_str(), "artist clicked");
+            Action::none()
+        }
+        Msg::CoverLoaded(id, result) => {
+            let Some(row) = state
+                .rows
+                .iter_mut()
+                .find(|row| row.artist.cover.as_ref() == Some(&id))
+            else {
+                return Action::none();
+            };
+            row.cover = match result {
+                Ok(bytes) => CoverState::Loaded(image::Handle::from_bytes(bytes)),
+                Err(_) => CoverState::Failed,
+            };
+            Action::none()
+        }
+        Msg::PlayShuffled(id) => Action::emit(Event::PlayShuffled(id)),
     }
+}
 
-    fn view(&self) -> iced::Element<'_, Self::Msg> {
-        if !self.loaded {
-            return text("loading...").into();
-        }
-        if self.rows.is_empty() {
-            return container(text("No artists found").color([0.6, 0.6, 0.6]))
-                .center(Fill)
-                .into();
-        }
-        let list = table(
-            [
-                table::column(text(""), |row: Row| cover_cell(row)),
-                table::column(text("Artist"), |row: Row| {
-                    Element::from(
-                        button(text(row.artist.name.clone()))
-                            .on_press(Msg::ArtistClicked(row.artist.id.clone())),
-                    )
-                })
-                .width(Fill),
-                table::column(text("Albums"), |row: Row| {
-                    text(row.artist.album_count.to_string())
-                }),
-                table::column(text(""), |row: Row| shuffle_button(row)),
-            ],
-            self.rows.clone(),
-        )
-        .width(Fill);
-        scrollable(list).width(Fill).height(Fill).into()
+pub fn view(state: &State) -> iced::Element<'_, Msg> {
+    if !state.loaded {
+        return text("loading...").into();
     }
+    if state.rows.is_empty() {
+        return container(text("No artists found").color([0.6, 0.6, 0.6]))
+            .center(Fill)
+            .into();
+    }
+    let list = table(
+        [
+            table::column(text(""), |row: Row| cover_cell(row)),
+            table::column(text("Artist"), |row: Row| {
+                Element::from(
+                    button(text(row.artist.name.clone()))
+                        .on_press(Msg::ArtistClicked(row.artist.id.clone())),
+                )
+            })
+            .width(Fill),
+            table::column(text("Albums"), |row: Row| {
+                text(row.artist.album_count.to_string())
+            }),
+            table::column(text(""), |row: Row| shuffle_button(row)),
+        ],
+        state.rows.clone(),
+    )
+    .width(Fill);
+    scrollable(list).width(Fill).height(Fill).into()
 }
 
 fn cover_cell(row: Row) -> Element<'static, Msg> {

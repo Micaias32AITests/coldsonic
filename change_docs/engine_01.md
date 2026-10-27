@@ -129,9 +129,11 @@ iced does not require them.
     (replaces `SongPlaying`; bar keeps cover display but mock has no bytes →
     placeholder space in Facet 1).
   - New msgs: `Msg::Engine(engine::EngineMsg)`, `Msg::Tick`.
-  - `Screen::subscription`: `Subscription::run` with a static builder —
-    `iced::stream::channel` looping `smol::Timer::after(250ms)` → `Msg::Tick`.
-    No engine data crosses into the subscription; `update` reads the engine.
+  - `MainScreen::subscription` (public; `main.rs` is a separate crate):
+    `Subscription::run` with a static builder — `iced::stream::channel` looping
+    `smol::Timer::after(250ms)` → `Msg::Tick`. No engine data crosses into the
+    subscription; `update` reads the engine. Child subscriptions, if any, are
+    `pub(in crate::screen)` and batched here.
   - `update`: route `Msg::Engine` through `engine.update(...).handle(...)`;
     on `Msg::Tick` call `engine.tick()` and apply events to `now_playing`
     (also log them — this is the "watch the events flow" verification).
@@ -139,12 +141,16 @@ iced does not require them.
     the snapshot) + minimal control buttons **pause/resume/prev/next** emitting
     `Msg::Engine(...)` — exercising the full pipe.
 - **`src/screen/artists.rs`:**
-  - `type Emit = Never` → `pub enum Event { PlayShuffled(ArtistId) }`.
+  - `Event` gains `PlayShuffled(ArtistId)`; `update` returns
+    `Action<Msg, Event>`.
   - `Msg::PlayShuffled` handler: `Action::emit(Event::PlayShuffled(id))` instead
     of the current no-op.
-- **MainScreen maps artists' emit** (via `Action.handle(.., on_emit)`):
-  `Task::perform(collect_shuffled_songs(manager.clone(), id))` →
-  `Msg::Engine(EngineMsg::PlayQueue(tracks))`.
+- **MainScreen maps artists' emit** by matching the returned `Action` and
+  calling an inherent handler (`handle_artists_event`), not an
+  `Action::handle` closure: `Task::perform(collect_shuffled_songs(
+  self.manager.clone(), id))` → `Msg::Engine(EngineMsg::PlayQueue(tracks))`.
+  `artists::update` receives a read-only `Ctx` and returns
+  `Action<Msg, Event>`.
   `collect_shuffled_songs`: uses `Manager::artist()` then for each album `Manager::album()` → collects songs → shuffle.
 - **Shuffle:** add `rand` for a Fisher–Yates shuffle (only new dep in Facet 1).
   Shuffle lives in the caller for now, not the engine.

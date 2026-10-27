@@ -28,12 +28,14 @@ is back.
 
 ## Locked in decisions
 
-- **The manager is the only seam the UI touches.** Screens hold `Arc<Manager>`
-  and ask it about artists/albums/tracks/covers (streams and scrobbles later).
-  Providers never reach the screens, and nothing above the manager knows how
-  many libraries exist or how they store data. This is the single chokepoint
-  that makes everything else easy: multi-source merging in one place, and sqlite
-  later without touching a single screen.
+- **The manager is the only seam the UI touches.** `MainScreen` owns
+  `Arc<Manager>`; child screens receive `&Arc<Manager>` through `Ctx` or direct
+  parameters and never store it. Screens ask it about
+  artists/albums/tracks/covers (streams and scrobbles later). Providers never
+  reach the screens, and nothing above the manager knows how many libraries
+  exist or how they store data. This is the single chokepoint that makes
+  everything else easy: multi-source merging in one place, and sqlite later
+  without touching a single screen.
 - **Enum, not trait, at the provider level.** `enum Library { Offline(..) }`
   mirrors the `Engine` enum (`src/engine/mod.rs`): derives `Debug + Clone` for
   iced, zero dyn/boxing machinery, and exhaustive matches mark every place a new
@@ -375,12 +377,16 @@ enum Mode {
     Opening,   // Manager::open in flight
 }
 
-impl Screen for State {
-    type Emit = Arc<Manager>;   // was Client
-    type InitData = ();         // reads config in init
-    ...
+impl State {
+    pub fn init() -> (Self, Task<Msg>);          // reads config in init
+    pub fn update(&mut self, msg: Msg) -> Action<Msg, Arc<Manager>>;
+    pub fn view(&self) -> Element<'_, Msg>;
 }
 ```
+
+The `Arc<Manager>` handoff is the screen's `Emit` event: `Action::emit(manager)`
+on success, handled by `main.rs` as `Msg::LibraryReady`. The setup screen is a
+root and does not receive `Ctx`.
 
 - `Mode::Select`: one button per **enabled** library (any of them opens the
   whole merged set — they all lead to the same view); disabled entries listed
@@ -422,17 +428,19 @@ yours to implement.
 ### Wiring
 
 - **`src/screen/mod.rs` (MainScreen):** `client: Arc<Client>` →
-  `manager: Arc<Manager>`; `InitData = Arc<Manager>`; cover fetch in
-  `apply_engine_event` via `manager.cover(track.cover…, COVER_PX)` (skipped when
+  `manager: Arc<Manager>`; `pub fn init(manager: Arc<Manager>) -> (Self,
+  Task<Msg>)`; cover fetch in `apply_engine_event` via
+  `manager.cover(track.cover…, COVER_PX)` (skipped when
   `track.cover.is_none()`); `Msg::CoverLoaded(CoverId, Result<Bytes, ()>)` keyed
   by cover id (stale-drop logic unchanged);
   `collect_shuffled_songs(manager, artist_id)` → `manager.artist(id)` → for each
   album `manager.album(id)` → flatten songs → `fisher_yates` (shuffle stays in
-  the caller).
-- **`src/screen/artists.rs`:** `ArtistId3` → `library::Artist`, state holds
-  `Arc<Manager>`; covers via `manager.cover(artist.cover…, COVER_PX)`; empty
-  state: distinguish "still loading" from "no artists found" (a loaded empty
-  list shows the latter instead of the eternal `loading...` today).
+  the caller). Child screens get `manager` through `Ctx`.
+- **`src/screen/artists.rs`:** `ArtistId3` → `library::Artist`; `State` holds
+  only rows/loading state, not `Arc<Manager>`; covers via
+  `ctx.manager.cover(artist.cover…, COVER_PX)` in `update`; empty state:
+  distinguish "still loading" from "no artists found" (a loaded empty list shows
+  the latter instead of the eternal `loading...` today).
 - **`src/engine/mod.rs`:** `pub type Track = crate::library::Track;`;
   `EngineError::Subsonic` → `Library(#[from] LibraryError)`.
 - **`src/engine/mock.rs`:** duration reads adapt to `Duration`
@@ -515,8 +523,8 @@ impl SubsonicLibrary {
 | `src/library/subsonic.rs`                 | subsonic provider (Facet 3)                                                                |
 | `src/config.rs`                           | `load_libraries`/`save_libraries` file IO; drop `Credentials` (Facet 2)                    |
 | `src/screen/library_setup.rs`             | new screen, replaces `login.rs`; `AddOffline` view stub (Facet 2)                          |
-| `src/screen/mod.rs`                       | `Arc<Manager>` everywhere, cover via manager, shuffled-songs via manager (Facet 2)         |
-| `src/screen/artists.rs`                   | neutral `Artist`, covers via manager, empty state (Facet 2)                                |
+| `src/screen/mod.rs`                       | owns `Arc<Manager>`, builds `Ctx`, cover via manager, shuffled-songs via manager (Facet 2)  |
+| `src/screen/artists.rs`                   | neutral `Artist`, receives manager via `Ctx`, empty state (Facet 2)                       |
 | `src/engine/mod.rs`                       | `Track` alias → `library::Track`; `EngineError` (Facet 2)                                  |
 | `src/engine/mock.rs`                      | `Duration` reads (Facet 2)                                                                 |
 | `src/main.rs`                             | `LibraryReady(Arc<Manager>)`, screen rename (Facet 2)                                      |

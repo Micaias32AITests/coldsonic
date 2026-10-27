@@ -1,3 +1,61 @@
+//! Screen construction convention.
+//!
+//! Screens are plain state structs with inherent methods. There is no `Screen`
+//! trait and no associated context type.
+//!
+//! # Shape
+//!
+//! Each screen module exposes:
+//!
+//! - `State`: local UI state only.
+//! - `Msg`: messages produced by its own view or async work.
+//! - `Event`: intents for the parent (`MainScreen`).
+//! - `init`: constructs `State`, optionally returning a `Task<Msg>`.
+//! - `update`: mutates local state and returns `Action<Msg, Event>`.
+//! - `view`: builds the element.
+//! - `subscription`: optional; batched by the parent screen.
+//!
+//! Shared read-only state is passed as a named `Ctx` when several values are
+//! needed, or as direct parameters when only one or two are needed. `Ctx` is
+//! `Copy`, read-only, built per call, and never stored in `State`.
+//!
+//! ```ignore
+//! pub fn init(id: AlbumId) -> (State, Task<Msg>);
+//!
+//! pub fn update(
+//!     state: &mut State,
+//!     ctx: Ctx<'_>,
+//!     msg: Msg,
+//! ) -> Action<Msg, Event>;
+//!
+//! pub fn view<'a>(
+//!     state: &'a State,
+//!     ctx: Ctx<'a>,
+//! ) -> Element<'a, Msg>;
+//! ```
+//!
+//! # Rules
+//!
+//! - Keep only local UI state in `State`. Do not store `Arc<Manager>`, `Engine`,
+//!   or any other parent-owned value in a screen.
+//! - Mutations go upward as `Event`. Never pass `&mut MainScreen` to a screen.
+//! - `Ctx` is read-only. If a screen needs a mutation, add an event instead of a
+//!   mutable context field.
+//! - `Arc::clone` is allowed only when handing a manager handle to an async
+//!   task. That is a refcount bump, not a clone of UI state.
+//! - Add fields to `Ctx` only when a screen actually reads them.
+//! - A screen's `subscription` is `pub(in crate::screen)` so `dead_code` warns
+//!   when its parent forgets to batch it. Do not add `#[deny(dead_code)]`.
+//! - Register new screens in `SubScreen`, `screen::Msg`,
+//!   `MainScreen::update`, `MainScreen::view_route`, and
+//!   `MainScreen::make_screen`.
+//!
+//! # Migration note
+//!
+//! `change_docs/screen_01.md` documents the move away from the `Screen` trait.
+//! Use the convention above for new screens; do not reintroduce a screen trait
+//! just to unify their signatures.
+
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -23,6 +81,17 @@ pub mod now_playing_panel;
 pub mod queue;
 pub mod settings;
 pub mod sidebar;
+
+/// Read-only shared state passed to a child screen for one call.
+///
+/// Built immediately before `update`/`view` from `MainScreen`'s fields. It is
+/// never stored in a screen, and it contains only references or `Copy` data.
+#[derive(Clone, Copy)]
+pub struct Ctx<'a> {
+    pub manager: &'a Arc<Manager>,
+    pub engine: &'a Engine,
+    pub now_playing: Option<&'a engine::NowPlaying>,
+}
 
 /// Engine tick period — fast enough to notice track-end within ~1/4 s and keep
 /// the bar smooth.
@@ -236,18 +305,8 @@ pub enum Msg {
     Keyboard(iced::keyboard::Event),
 }
 
-impl Screen for MainScreen {
-    type Msg = Msg;
-
-    type Emit = Never;
-
-    type InitData = Arc<Manager>;
-
-    fn init(data: Self::InitData) -> (Self, Action<Self::Msg, Self::Emit>)
-    where
-        Self: Sized,
-    {
-        let manager = data;
+impl MainScreen {
+    pub fn init(manager: Arc<Manager>) -> (Self, Task<Msg>) {
         let ui_settings = config::load_ui_settings();
         let panel_open = match ui_settings.panel_startup {
             PanelStartup::PersistState => ui_settings.panel_open,
@@ -257,8 +316,7 @@ impl Screen for MainScreen {
         let panel_screen = PanelScreen::from(ui_settings.panel_screen.clone());
         let panes = Panes::build(&ui_settings, panel_open);
 
-        let (artists_state, action) = artists::State::init(manager.clone());
-        let task = action.handle(Msg::ArtistsScreenMsg, |_event| Task::none());
+        let (artists_state, task) = artists::init(manager.clone());
 
         let entries = vec![StackEntry::new(
             0,
@@ -284,32 +342,43 @@ impl Screen for MainScreen {
                 panel_open,
                 panel_screen,
             },
-            Action::task(task),
+            task.map(Msg::ArtistsScreenMsg),
         )
     }
 
-    fn update(&mut self, msg: Self::Msg) -> Action<Self::Msg, Self::Emit> {
+    pub fn update(&mut self, msg: Msg) -> Task<Msg> {
         match msg {
             Msg::ArtistsScreenMsg(inner) => {
-                let Some(entry) = self.entries.last_mut() else {
-                    return Action::none();
+                let action = {
+                    let MainScreen {
+                        entries,
+                        manager,
+                        engine,
+                        now_playing,
+                        ..
+                    } = self;
+
+                    let Some(entry) = entries.last_mut() else {
+                        return Task::none();
+                    };
+                    let SubScreen::Artists(screen) = &mut entry.value.screen else {
+                        return Task::none();
+                    };
+
+                    let ctx = Ctx {
+                        manager: &*manager,
+                        engine: &*engine,
+                        now_playing: now_playing.as_ref(),
+                    };
+
+                    artists::update(screen, ctx, inner)
                 };
-                let SubScreen::Artists(screen) = &mut entry.value.screen else {
-                    return Action::none();
-                };
-                let manager = self.manager.clone();
-                let task = screen
-                    .update(inner)
-                    .handle(Msg::ArtistsScreenMsg, move |event| match event {
-                        artists::Event::PlayShuffled(id) => {
-                            let manager = manager.clone();
-                            Task::perform(collect_shuffled_songs(manager, id), |res| match res {
-                                Ok(tracks) => Msg::Engine(EngineMsg::PlayQueue(tracks)),
-                                Err(err) => Msg::EngineEvent(EngineEvent::Error(err.to_string())),
-                            })
-                        }
-                    });
-                Action::task(task)
+
+                match action {
+                    Action::None => Task::none(),
+                    Action::Task(task) => task.map(Msg::ArtistsScreenMsg),
+                    Action::Emit(event) => self.handle_artists_event(event),
+                }
             }
             Msg::Engine(msg) => {
                 // Mute-toggle bookkeeping: remember the pre-mute volume when
@@ -321,11 +390,9 @@ impl Screen for MainScreen {
                 {
                     self.last_volume = np.volume;
                 }
-                Action::task(
-                    self.engine
-                        .update(msg)
-                        .handle(Msg::Engine, |event| Task::done(Msg::EngineEvent(event))),
-                )
+                self.engine
+                    .update(msg)
+                    .handle(Msg::Engine, |event| Task::done(Msg::EngineEvent(event)))
             }
             Msg::EngineEvent(event) => self.apply_engine_event(event),
             Msg::Tick => {
@@ -333,7 +400,6 @@ impl Screen for MainScreen {
                 let mut tasks: Vec<Task<Msg>> = events
                     .into_iter()
                     .map(|event| self.apply_engine_event(event))
-                    .map(|action| action.handle(|msg| msg, |_| Task::none()))
                     .collect();
                 tasks.push(engine_task.map(Msg::Engine));
 
@@ -343,34 +409,34 @@ impl Screen for MainScreen {
                     self.save_settings();
                 }
 
-                Action::task(Task::batch(tasks))
+                Task::batch(tasks)
             }
             // Ignore stale results: only the current track's cover is shown,
             // so a slow response for a track we've already left must not
             // clobber a newer cover.
             Msg::CoverLoaded(id, result) => {
                 let Some(np) = &self.now_playing else {
-                    return Action::none();
+                    return Task::none();
                 };
                 if np.track.cover.as_ref() != Some(&id) {
-                    return Action::none();
+                    return Task::none();
                 }
                 self.cover = match result {
                     Ok(bytes) => Some(image::Handle::from_bytes(bytes)),
                     Err(_) => None, // fallback (music icon) shown instead
                 };
-                Action::none()
+                Task::none()
             }
             Msg::SeekDragged(position) => {
                 self.seeking = Some(position);
-                Action::none()
+                Task::none()
             }
             Msg::SeekReleased => {
                 let Some(position) = self.seeking else {
-                    return Action::none();
+                    return Task::none();
                 };
-                Action::task(Task::done(Msg::Engine(EngineMsg::Seek(
-                    Duration::from_secs_f32(position),
+                Task::done(Msg::Engine(EngineMsg::Seek(Duration::from_secs_f32(
+                    position,
                 ))))
             }
             Msg::PaneResized(event) => {
@@ -397,7 +463,7 @@ impl Screen for MainScreen {
                         self.settings_dirty = true;
                     }
                 }
-                Action::none()
+                Task::none()
             }
             Msg::Sidebar(sidebar_msg) => self.handle_sidebar(sidebar_msg),
             Msg::TogglePanel => {
@@ -412,36 +478,48 @@ impl Screen for MainScreen {
                     self.panes.close_panel();
                 }
                 self.save_settings();
-                Action::none()
+                Task::none()
             }
             Msg::SwitchPanel(screen) => {
                 self.panel_screen = screen;
                 self.ui_settings.panel_screen = PanelScreenConfig::from(screen);
                 self.save_settings();
-                Action::none()
+                Task::none()
             }
             Msg::Back => {
                 // The root entry is never popped: back from a root is a no-op.
                 if self.entries.len() > 1 {
                     self.entries.pop();
                 }
-                Action::none()
+                Task::none()
             }
             Msg::Keyboard(event) => {
                 let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
-                    return Action::none();
+                    return Task::none();
                 };
                 let back = modifiers.alt()
                     && key == iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowLeft);
                 if back && self.entries.len() > 1 {
                     self.entries.pop();
                 }
-                Action::none()
+                Task::none()
             }
         }
     }
 
-    fn view(&self) -> Element<'_, Self::Msg> {
+    fn handle_artists_event(&mut self, event: artists::Event) -> Task<Msg> {
+        match event {
+            artists::Event::PlayShuffled(id) => {
+                let manager = self.manager.clone();
+                Task::perform(collect_shuffled_songs(manager, id), |res| match res {
+                    Ok(tracks) => Msg::Engine(EngineMsg::PlayQueue(tracks)),
+                    Err(err) => Msg::EngineEvent(EngineEvent::Error(err.to_string())),
+                })
+            }
+        }
+    }
+
+    pub fn view(&self) -> Element<'_, Msg> {
         let content = pane_grid(&self.panes.state, |_, pane_state, _is_maximized| {
             let content: Element<'_, Msg> = match pane_state {
                 Region::Sidebar => sidebar::view(Msg::Sidebar),
@@ -460,7 +538,7 @@ impl Screen for MainScreen {
             .into()
     }
 
-    fn subscription(&self) -> Subscription<Self::Msg> {
+    pub fn subscription(&self) -> Subscription<Msg> {
         Subscription::batch([
             Subscription::run(tick_stream),
             iced::keyboard::listen().map(Msg::Keyboard),
@@ -489,9 +567,8 @@ impl MainScreen {
     fn make_screen(&self, route: &Route) -> (SubScreen, Task<Msg>) {
         match route {
             Route::Artists => {
-                let (state, action) = artists::State::init(self.manager.clone());
-                let task = action.handle(Msg::ArtistsScreenMsg, |_event| Task::none());
-                (SubScreen::Artists(state), task)
+                let (state, task) = artists::init(self.manager.clone());
+                (SubScreen::Artists(state), task.map(Msg::ArtistsScreenMsg))
             }
             Route::ArtistDetail(id) => (SubScreen::ArtistDetail(id.clone()), Task::none()),
             Route::AlbumDetail(id) => (SubScreen::AlbumDetail(id.clone()), Task::none()),
@@ -528,8 +605,8 @@ impl MainScreen {
         self.push_route(route)
     }
 
-    fn handle_sidebar(&mut self, msg: sidebar::Msg) -> Action<Msg, Never> {
-        let task = match msg {
+    fn handle_sidebar(&mut self, msg: sidebar::Msg) -> Task<Msg> {
+        match msg {
             sidebar::Msg::Artists => self.goto_root(Route::Artists),
             sidebar::Msg::Albums => self.goto_root(Route::Albums),
             sidebar::Msg::Tracks => self.goto_root(Route::AllTracks),
@@ -549,9 +626,7 @@ impl MainScreen {
                     self.push_route(Route::Settings)
                 }
             }
-        };
-
-        Action::task(task)
+        }
     }
 
     fn view_stack<'a>(&'a self) -> Element<'a, Msg> {
@@ -563,7 +638,7 @@ impl MainScreen {
 
     fn view_route<'a>(&'a self, entry: &'a ScreenEntry) -> Element<'a, Msg> {
         match &entry.screen {
-            SubScreen::Artists(screen) => screen.view().map(Msg::ArtistsScreenMsg),
+            SubScreen::Artists(screen) => artists::view(screen).map(Msg::ArtistsScreenMsg),
             SubScreen::ArtistDetail(id) => placeholder(format!("Artist {}", id.as_str())),
             SubScreen::AlbumDetail(id) => placeholder(format!("Album {}", id.as_str())),
             SubScreen::Albums => placeholder("Albums"),
@@ -722,7 +797,7 @@ impl MainScreen {
     /// Log an engine event and refresh the now-playing snapshot pushed to the
     /// bar. Returns any task the event spawns (e.g. a cover fetch — this is
     /// the "watch the events flow" verification of Facet 1).
-    fn apply_engine_event(&mut self, event: EngineEvent) -> Action<Msg, Never> {
+    fn apply_engine_event(&mut self, event: EngineEvent) -> Task<Msg> {
         debug!(?event, "engine event");
         let mut task = Task::none();
         match event {
@@ -756,7 +831,7 @@ impl MainScreen {
         }
 
         self.now_playing = self.engine.now_playing();
-        Action::task(task)
+        task
     }
 }
 

@@ -1,4 +1,4 @@
-// TODO(ui_01 phase 4): implement `Screen` for `State` (init/update/view),
+// TODO(ui_01 phase 4): implement inherent `init`/`update`/`view` for `State`,
 // reusing the now-playing bar components. Held by the right panel.
 // Placeholder screen until then.
 

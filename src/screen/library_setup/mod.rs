@@ -55,31 +55,22 @@ fn open_task(libraries: Vec<LibraryConfig>) -> Action<Msg, Arc<Manager>> {
     ))
 }
 
-impl Screen for State {
-    type Msg = Msg;
-
-    type Emit = Arc<Manager>;
-
-    type InitData = ();
-
-    fn init(_: Self::InitData) -> (Self, Action<Self::Msg, Self::Emit>)
-    where
-        Self: Sized,
-    {
+impl State {
+    pub fn init() -> (Self, Task<Msg>) {
         let (libraries, error) = match config::load_libraries() {
             Ok(libraries) => (libraries, None),
             Err(err) => (Vec::new(), Some(err.to_string())),
         };
-        let (list, _) = list_libraries::State::init((libraries, error));
+        let list = list_libraries::State::init(libraries, error);
         (
             Self {
                 mode: Mode::ListLibraries(list),
             },
-            Action::none(),
+            Task::none(),
         )
     }
 
-    fn update(&mut self, msg: Self::Msg) -> Action<Self::Msg, Self::Emit> {
+    pub fn update(&mut self, msg: Msg) -> Action<Msg, Arc<Manager>> {
         match msg {
             Msg::ListLibraries(inner) => {
                 let Mode::ListLibraries(screen) = &mut self.mode else {
@@ -106,12 +97,12 @@ impl Screen for State {
                 }))
             }
             Msg::ShowAddForm(libraries) => {
-                let (form, _) = add_offline::State::init(libraries);
+                let form = add_offline::State::init(libraries);
                 self.mode = Mode::AddOffline(form);
                 Action::none()
             }
             Msg::ShowList(libraries) => {
-                let (list, _) = list_libraries::State::init((libraries, None));
+                let list = list_libraries::State::init(libraries, None);
                 self.mode = Mode::ListLibraries(list);
                 Action::none()
             }
@@ -132,7 +123,7 @@ impl Screen for State {
                     Ok(manager) => Action::emit(manager),
                     Err(err) => {
                         warn!(error = %err, "library open failed");
-                        let (list, _) = list_libraries::State::init((libraries, Some(err)));
+                        let list = list_libraries::State::init(libraries, Some(err));
                         self.mode = Mode::ListLibraries(list);
                         Action::none()
                     }
@@ -141,7 +132,7 @@ impl Screen for State {
         }
     }
 
-    fn view(&self) -> iced::Element<'_, Self::Msg> {
+    pub fn view(&self) -> iced::Element<'_, Msg> {
         match &self.mode {
             Mode::ListLibraries(screen) => screen.view().map(Msg::ListLibraries),
             Mode::AddOffline(screen) => screen.view().map(Msg::AddOffline),

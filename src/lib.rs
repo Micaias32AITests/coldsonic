@@ -1,4 +1,4 @@
-use iced::{Subscription, Task};
+use iced::Task;
 
 pub mod config;
 pub mod engine;
@@ -70,29 +70,5 @@ impl<T> Action<T, Never> {
             Self::None => Task::none(),
             Self::Task(t) => t,
         }
-    }
-}
-
-pub trait Screen {
-    type Msg;
-
-    /// this is the type that the upper recieves as a way to send messages to the parent screen
-    type Emit;
-
-    type InitData;
-
-    #[must_use]
-    fn init(data: Self::InitData) -> (Self, Action<Self::Msg, Self::Emit>)
-    where
-        Self: Sized;
-
-    #[must_use]
-    fn update(&mut self, msg: Self::Msg) -> Action<Self::Msg, Self::Emit>;
-
-    #[must_use]
-    fn view(&self) -> iced::Element<'_, Self::Msg>;
-
-    fn subscription(&self) -> Subscription<Self::Msg> {
-        Subscription::none()
     }
 }

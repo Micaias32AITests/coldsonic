@@ -3,9 +3,9 @@ use iced::Alignment::Center;
 use iced::Length::Fill;
 use iced::{Element, Subscription, Task, Theme, application};
 
+use coldsonic::library::Manager;
 use coldsonic::screen;
 use coldsonic::screen::library_setup;
-use coldsonic::{Screen, library::Manager};
 use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {
@@ -54,12 +54,9 @@ impl State {
         {}
 
         {
-            let (screen, action) = library_setup::State::init(());
-            let setup_task = action.handle(Msg::ScreenSetup, |manager| {
-                Task::done(Msg::LibraryReady(manager))
-            });
+            let (screen, setup_task) = library_setup::State::init();
             let task = Task::batch(vec![
-                setup_task,
+                setup_task.map(Msg::ScreenSetup),
                 iced::font::load(iced_fonts::LUCIDE_FONT_BYTES).map(Msg::FontLoaded),
             ]);
             (Self::Setup(screen), task)
@@ -69,8 +66,8 @@ impl State {
     pub fn subscription(&self) -> Subscription<Msg> {
         match self {
             #[cfg(feature = "dev")]
-            Self::Debug(screen) => screen.subscription().map(Msg::ScreenDebug),
-            Self::Setup(screen) => screen.subscription().map(Msg::ScreenSetup),
+            Self::Debug(_) => Subscription::none(),
+            Self::Setup(_) => Subscription::none(),
             Self::Main(screen) => screen
                 .subscription()
                 .map(|msg| Msg::ScreenMain(Box::new(msg))),
@@ -91,22 +88,19 @@ impl State {
             }
             #[cfg(feature = "dev")]
             Msg::GoToDebug => {
-                let (screen, action) = screen::debug::State::init(());
-                let task = action.handle(Msg::ScreenDebug, |_event| Task::none());
+                let (screen, task) = screen::debug::State::init();
 
                 *self = Self::Debug(screen);
                 Task::batch(vec![
-                    task,
+                    task.map(Msg::ScreenDebug),
                     iced::font::load(iced_fonts::LUCIDE_FONT_BYTES).map(Msg::FontLoaded),
                 ])
             }
             Msg::GoToSetup => {
                 // Back to the normal flow.
-                let (screen, setup_action) = library_setup::State::init(());
+                let (screen, task) = library_setup::State::init();
                 *self = Self::Setup(screen);
-                setup_action.handle(Msg::ScreenSetup, |manager| {
-                    Task::done(Msg::LibraryReady(manager))
-                })
+                task.map(Msg::ScreenSetup)
             }
             Msg::ScreenSetup(inner) => {
                 let screen = match self {
@@ -120,9 +114,9 @@ impl State {
                 })
             }
             Msg::LibraryReady(manager) => {
-                let (screen, action) = screen::MainScreen::init(manager);
+                let (screen, task) = screen::MainScreen::init(manager);
                 *self = Self::Main(Box::new(screen));
-                action.handle(|msg| Msg::ScreenMain(Box::new(msg)), |_| Task::none())
+                task.map(|msg| Msg::ScreenMain(Box::new(msg)))
             }
             Msg::ScreenMain(inner) => {
                 let screen = match self {
@@ -133,7 +127,6 @@ impl State {
                 };
                 screen
                     .update(*inner)
-                    .to_task()
                     .map(|msg| Msg::ScreenMain(Box::new(msg)))
             }
         }

@@ -15,9 +15,11 @@ state, seek-draft logic, and transport row are designed to be reused by it.
 
 ## Decisions
 
-- **Volume is engine state.** The engine owns playback state; the bar reads it
-  from the pushed `NowPlaying` snapshot. Add `volume: f32` (0.0–1.0) to it
-  rather than keeping volume in the UI.
+- **Volume is engine state.** The engine owns playback state; `MainScreen`
+  caches it in `now_playing: Option<NowPlaying>` and the bar reads those fields.
+  Add `volume: f32` (0.0–1.0) to `NowPlaying` rather than keeping volume in the
+  UI. Child screens receive read-only `NowPlaying` data through `Ctx`, not by
+  owning a snapshot handle.
 - **`Prev` needs history.** `Next`/auto-advance already model a "up next"
   queue; add a `history` deque (newest last) for previous tracks. Standard
   player semantics: if position > 3 s, `Prev` restarts the current track;
@@ -28,11 +30,11 @@ state, seek-draft logic, and transport row are designed to be reused by it.
 - **Volume updates immediately.** `SetVolume` needs to reach the bar while
   dragging, but is harmless (unlike seek), so it fires continuously on change
   and the mock pushes `UpdateNowPlaying` to refresh the snapshot.
-- **Cover fetch reuses the artists-screen pattern.** Track (a Subsonic `Child`)
-  already carries `cover_art`. Fetch via `client.get_cover_art(id, Some(96))`
-  (2× the 48 px display for HiDPI); build the `image::Handle` once on arrival
-  and reuse it every frame so iced's image cache is not defeated (see the
-  comment in `artists.rs`). Key results by track id and drop stale ones.
+- **Cover fetch reuses the artists-screen pattern.** `Track` carries
+  `cover: Option<CoverId>`. Fetch via `manager.cover(&id, COVER_PX)` (2× the
+  48 px display for HiDPI); build the `image::Handle` once on arrival and reuse
+  it every frame so iced's image cache is not defeated (see the comment in
+  `artists.rs`). Key results by cover id and drop stale ones.
 - **No new dependencies.**
 
 ## Changes
@@ -71,17 +73,18 @@ New `MainScreen` fields:
 
 New messages:
 
-- `CoverLoaded(String, Result<Bytes, ()>)` — track id + fetch result.
-- `SeekDragged(f32)` — store draft in `seeking`; `Action::none()`.
+- `CoverLoaded(CoverId, Result<Bytes, ()>)` — cover id + fetch result.
+- `SeekDragged(f32)` — store draft in `seeking`; `Task::none()`.
 - `SeekReleased` — take draft, clear `seeking`, then
-  `Action::task(Task::done(Msg::Engine(EngineMsg::Seek(Duration::from_secs_f32(d)))))`.
+  `Task::done(Msg::Engine(EngineMsg::Seek(Duration::from_secs_f32(d))))`.
 
 `apply_engine_event`:
 
 - On `PlaybackStarted(track)`: clear `cover` and `seeking`; if
-  `track.cover_art.is_some()`, spawn
-  `Task::perform(Compat::new(client.get_cover_art(id, Some(COVER_PX))), ...)`
-  mapping to `Msg::CoverLoaded(id, result)` (mirror `artists.rs`).
+  `track.cover.is_some()`, spawn
+  `Task::perform(async move { manager.cover(&id, COVER_PX).await }, ...)`
+  mapping to `Msg::CoverLoaded(id, result)` (mirror `artists.rs`). The manager
+  is cloned only as an async task handle.
 - On `Stopped`: clear `cover` and `seeking`.
 
 `update` additions:

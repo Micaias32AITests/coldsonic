@@ -58,22 +58,13 @@ impl State {
     }
 }
 
-impl Screen for State {
-    type Msg = Msg;
-
-    type Emit = Event;
-
-    /// The loaded config list plus any load error to display.
-    type InitData = (Vec<LibraryConfig>, Option<String>);
-
-    fn init((libraries, error): Self::InitData) -> (Self, Action<Self::Msg, Self::Emit>)
-    where
-        Self: Sized,
-    {
-        (Self { libraries, error }, Action::none())
+impl State {
+    /// Construct from the loaded config list plus any load error to display.
+    pub fn init(libraries: Vec<LibraryConfig>, error: Option<String>) -> Self {
+        Self { libraries, error }
     }
 
-    fn update(&mut self, msg: Self::Msg) -> Action<Self::Msg, Self::Emit> {
+    pub fn update(&mut self, msg: Msg) -> Action<Msg, Event> {
         match msg {
             Msg::OpenApp => {
                 if !self.any_enabled() {
@@ -110,7 +101,7 @@ impl Screen for State {
         }
     }
 
-    fn view(&self) -> iced::Element<'_, Self::Msg> {
+    pub fn view(&self) -> iced::Element<'_, Msg> {
         let mut list = widget::column![text("Libraries").size(20)]
             .spacing(8)
             .width(400);

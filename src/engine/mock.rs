@@ -12,7 +12,8 @@ use iced::Task;
 
 use crate::Action;
 
-use super::{EngineEvent, EngineMsg, NowPlaying, PlaybackState, Track};
+use super::queue::{Queue, QueueEntry};
+use super::{EngineEvent, EngineMsg, NowPlaying, PlaybackState};
 
 /// Fake playback speed: each 250 ms tick advances the position a second so the
 /// mock bar visibly moves.
@@ -20,10 +21,7 @@ const SIMULATED_SECONDS_PER_TICK: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone)]
 pub struct MockEngine {
-    queue: VecDeque<Track>,
-    /// Played tracks, newest last — feeds `Prev`.
-    history: VecDeque<Track>,
-    current: Option<Track>,
+    queue: Queue,
     position: Duration,
     state: PlaybackState,
     /// Engine-owned volume (0.0–1.0), read by the bar from the snapshot.
@@ -42,9 +40,7 @@ impl Default for MockEngine {
 impl MockEngine {
     pub fn new() -> Self {
         Self {
-            queue: VecDeque::new(),
-            history: VecDeque::new(),
-            current: None,
+            queue: Queue::new(),
             position: Duration::ZERO,
             state: PlaybackState::Stopped,
             volume: 1.0,
@@ -56,52 +52,36 @@ impl MockEngine {
         tracing::info!(?msg, "engine msg");
         match msg {
             EngineMsg::PlayQueue(tracks) => {
-                self.queue = tracks.into();
-                self.history.clear();
                 self.position = Duration::ZERO;
-                match self.queue.pop_front() {
-                    Some(track) => {
-                        self.current = Some(track.clone());
+                match self.queue.replace(tracks) {
+                    Some(entry) => {
+                        let track = entry.track.clone();
                         self.state = PlaybackState::Playing;
-                        self.pending.push_back(EngineEvent::QueueChanged);
                         self.pending.push_back(EngineEvent::PlaybackStarted(track));
                     }
                     None => {
-                        self.current = None;
                         self.state = PlaybackState::Stopped;
-                        self.pending.push_back(EngineEvent::QueueChanged);
                     }
                 }
             }
-            EngineMsg::PlayNext(track) => {
-                if let Some(current) = self.current.take() {
-                    self.history.push_back(current);
-                }
-                self.queue.push_front(track.clone());
-                self.current = Some(track.clone());
+            EngineMsg::PlayNow(track) => {
+                let track = self.queue.play_now(track).track.clone();
                 self.position = Duration::ZERO;
                 self.state = PlaybackState::Playing;
                 self.pending.push_back(EngineEvent::PlaybackStarted(track));
-                self.pending.push_back(EngineEvent::QueueChanged);
             }
             EngineMsg::Enqueue(track) => {
-                self.queue.push_back(track);
-                self.pending.push_back(EngineEvent::QueueChanged);
+                self.queue.enqueue(track);
             }
             EngineMsg::Next => {
-                if let Some(current) = self.current.take() {
-                    self.history.push_back(current);
-                }
-                match self.queue.pop_front() {
-                    Some(track) => {
-                        self.current = Some(track.clone());
-                        self.position = Duration::ZERO;
+                self.position = Duration::ZERO;
+                match self.queue.advance() {
+                    Some(entry) => {
+                        let track = entry.track.clone();
                         self.state = PlaybackState::Playing;
                         self.pending.push_back(EngineEvent::PlaybackStarted(track));
                     }
                     None => {
-                        self.current = None;
-                        self.position = Duration::ZERO;
                         self.state = PlaybackState::Stopped;
                         self.pending.push_back(EngineEvent::Stopped);
                     }
@@ -110,22 +90,17 @@ impl MockEngine {
             EngineMsg::Prev => {
                 if self.position > Duration::from_secs(3) {
                     // Past the restart threshold → restart the current track.
-                    if let Some(current) = self.current.clone() {
+                    if let Some(entry) = self.queue.current() {
+                        let track = entry.track.clone();
                         self.position = Duration::ZERO;
                         self.state = PlaybackState::Playing;
-                        self.pending
-                            .push_back(EngineEvent::PlaybackStarted(current));
+                        self.pending.push_back(EngineEvent::PlaybackStarted(track));
                     }
-                } else if let Some(prev) = self.history.pop_back() {
-                    // Step back into history; the current track heads to the
-                    // queue front so `Next` replays it.
-                    if let Some(current) = self.current.take() {
-                        self.queue.push_front(current);
-                    }
-                    self.current = Some(prev.clone());
+                } else if let Some(entry) = self.queue.step_back() {
+                    let track = entry.track.clone();
                     self.position = Duration::ZERO;
                     self.state = PlaybackState::Playing;
-                    self.pending.push_back(EngineEvent::PlaybackStarted(prev));
+                    self.pending.push_back(EngineEvent::PlaybackStarted(track));
                 }
             }
             EngineMsg::Pause => {
@@ -152,8 +127,7 @@ impl MockEngine {
                 PlaybackState::Stopped | PlaybackState::Loading => {}
             },
             EngineMsg::Stop => {
-                self.current = None;
-                self.history.clear();
+                self.queue.stop();
                 self.position = Duration::ZERO;
                 if self.state != PlaybackState::Stopped {
                     self.state = PlaybackState::Stopped;
@@ -168,9 +142,9 @@ impl MockEngine {
             }
             EngineMsg::Seek(position) => {
                 let max = self
-                    .current
-                    .as_ref()
-                    .map(|track| track.duration)
+                    .queue
+                    .current()
+                    .map(|entry| entry.track.duration)
                     .unwrap_or(Duration::from_secs(10));
                 self.position = position.min(max);
                 self.pending.push_back(EngineEvent::SeekDone);
@@ -187,11 +161,16 @@ impl MockEngine {
             self.position += SIMULATED_SECONDS_PER_TICK;
             events.push(EngineEvent::UpdateNowPlaying);
             if self
-                .current
-                .as_ref()
-                .is_some_and(|t| t.duration <= self.position)
+                .queue
+                .current()
+                .is_some_and(|entry| entry.track.duration <= self.position)
             {
-                let finished = self.current.clone().expect("playing ⇒ current is set");
+                let finished = self
+                    .queue
+                    .current()
+                    .expect("playing ⇒ current is set")
+                    .track
+                    .clone();
                 events.push(EngineEvent::TrackFinished(finished));
                 self.advance();
             }
@@ -201,7 +180,7 @@ impl MockEngine {
     }
 
     pub fn now_playing(&self) -> Option<NowPlaying> {
-        let track = self.current.clone()?;
+        let track = self.queue.current()?.track.clone();
         Some(NowPlaying {
             position: self.position,
             duration: track.duration,
@@ -211,19 +190,19 @@ impl MockEngine {
         })
     }
 
+    pub fn queue(&self) -> std::collections::vec_deque::Iter<'_, QueueEntry> {
+        self.queue.upcoming()
+    }
+
     /// Auto-advance to the next queued track (or stop when the queue is empty).
     fn advance(&mut self) {
-        if let Some(current) = self.current.take() {
-            self.history.push_back(current);
-        }
-        match self.queue.pop_front() {
-            Some(next) => {
-                self.current = Some(next.clone());
+        match self.queue.advance() {
+            Some(entry) => {
+                let track = entry.track.clone();
                 self.position = Duration::ZERO;
-                self.pending.push_back(EngineEvent::PlaybackStarted(next));
+                self.pending.push_back(EngineEvent::PlaybackStarted(track));
             }
             None => {
-                self.current = None;
                 self.position = Duration::ZERO;
                 self.state = PlaybackState::Stopped;
                 self.pending.push_back(EngineEvent::Stopped);
@@ -237,5 +216,92 @@ impl MockEngine {
             Some(event) => Action::emit(event),
             None => Action::none(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crate::library::TrackId;
+
+    use super::*;
+    use crate::engine::Track;
+
+    fn track(name: &str) -> Track {
+        Track {
+            id: TrackId::new(name),
+            title: name.to_owned(),
+            artist: None,
+            album: None,
+            track_no: None,
+            duration: Duration::from_secs(60),
+            cover: None,
+        }
+    }
+
+    fn upcoming(engine: &MockEngine) -> Vec<&str> {
+        engine
+            .queue()
+            .map(|entry| entry.track.title.as_str())
+            .collect()
+    }
+
+    fn current(engine: &MockEngine) -> Option<&str> {
+        engine
+            .queue
+            .current()
+            .map(|entry| entry.track.title.as_str())
+    }
+
+    #[test]
+    fn play_now_does_not_touch_upcoming() {
+        let mut engine = MockEngine::new();
+        engine.update(EngineMsg::PlayQueue(vec![track("a"), track("b")]));
+
+        engine.update(EngineMsg::PlayNow(track("c")));
+
+        assert_eq!(current(&engine), Some("c"));
+        assert_eq!(upcoming(&engine), ["b"]);
+    }
+
+    #[test]
+    fn enqueue_appends_and_keeps_current_playing() {
+        let mut engine = MockEngine::new();
+        engine.update(EngineMsg::PlayQueue(vec![track("a")]));
+
+        engine.update(EngineMsg::Enqueue(track("b")));
+
+        assert_eq!(current(&engine), Some("a"));
+        assert_eq!(upcoming(&engine), ["b"]);
+        assert_eq!(engine.state, PlaybackState::Playing);
+    }
+
+    #[test]
+    fn prev_steps_back_when_near_the_start() {
+        let mut engine = MockEngine::new();
+        engine.update(EngineMsg::PlayQueue(vec![track("a"), track("b")]));
+        engine.update(EngineMsg::Next);
+
+        engine.update(EngineMsg::Prev);
+
+        assert_eq!(current(&engine), Some("a"));
+        assert_eq!(upcoming(&engine), ["b"]);
+    }
+
+    #[test]
+    fn prev_restarts_without_mutating_the_queue_past_the_threshold() {
+        let mut engine = MockEngine::new();
+        engine.update(EngineMsg::PlayQueue(vec![track("a"), track("b")]));
+        engine.update(EngineMsg::Next);
+        let before: Vec<String> = upcoming(&engine).into_iter().map(str::to_owned).collect();
+        engine.position = Duration::from_secs(10);
+
+        engine.update(EngineMsg::Prev);
+
+        assert_eq!(current(&engine), Some("b"));
+        let after: Vec<String> = upcoming(&engine).into_iter().map(str::to_owned).collect();
+        assert_eq!(before, after);
+        assert_eq!(engine.position, Duration::ZERO);
     }
 }

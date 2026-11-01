@@ -7,6 +7,7 @@
 
 pub mod mock;
 pub mod player;
+pub mod queue;
 pub mod real;
 
 use std::sync::Arc;
@@ -17,6 +18,8 @@ use iced::Task;
 use crate::Action;
 use crate::library::Manager;
 
+pub use queue::{Queue, QueueEntry, QueueEntryId};
+
 /// What we play — the neutral track every provider hands over.
 pub type Track = crate::library::Track;
 
@@ -25,14 +28,18 @@ pub type Track = crate::library::Track;
 pub enum EngineMsg {
     /// Replace the queue, play the first track.
     PlayQueue(Vec<Track>),
-    /// Play now, insert at the front of the queue.
-    PlayNext(Track),
+    /// Play a track immediately. The current track moves to history; the
+    /// upcoming queue is not modified.
+    PlayNow(Track),
     /// Append to the queue end.
     Enqueue(Track),
     /// Skip to the next queued track.
     Next,
     /// Go back: restart the current track when it's past the threshold,
     /// otherwise step back into the playback history.
+    ///
+    /// Engine-level command: the queue exposes `step_back()` and the restart
+    /// path separately, because the choice needs the playback position.
     Prev,
     Pause,
     Resume,
@@ -60,7 +67,6 @@ pub enum EngineEvent {
     Stopped,
     SeekDone,
     UpdateNowPlaying,
-    QueueChanged,
     Error(String),
 }
 
@@ -138,6 +144,18 @@ impl Engine {
         match self {
             Engine::Mock(engine) => engine.now_playing(),
             Engine::Real(engine) => engine.now_playing(),
+        }
+    }
+
+    /// Borrowed iteration over the upcoming queue, in playback order.
+    ///
+    /// `Clone + ExactSizeIterator` lets `lazy_list` consume it directly. There
+    /// is deliberately no mutable accessor: mutations go through
+    /// [`EngineMsg`].
+    pub fn queue(&self) -> std::collections::vec_deque::Iter<'_, QueueEntry> {
+        match self {
+            Engine::Mock(engine) => engine.queue(),
+            Engine::Real(engine) => engine.queue(),
         }
     }
 }

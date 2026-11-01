@@ -1,8 +1,8 @@
 # Right panel 01 — Queue and Now-playing screens
 
-Status: planned. Companion to `ui_01.md` (phase 4), which reserves region 03 but
-deliberately leaves its contents underspecified. This doc supersedes
-`ui_01.md` §5 where the two disagree.
+Status: implemented on `main`. Companion to `ui_01.md` (phase 4), which
+reserves region 03 but deliberately leaves its contents underspecified. This
+doc supersedes `ui_01.md` §5 where the two disagree.
 
 Applies to: `src/engine/mod.rs`, `src/engine/queue.rs` (new),
 `src/engine/mock.rs`, `src/engine/real.rs`, `src/screen/mod.rs`,
@@ -139,8 +139,14 @@ pub struct Queue {
 - `MockEngine` and `RealEngine` embed `queue: Queue` and stop maintaining their
   own `queue`/`history`/`current` fields.
 - Queue methods cover the existing behaviour: replace/play queue, play now,
-  enqueue, next/advance, previous/restart, stop, current access, and borrowed
-  iteration over upcoming.
+  enqueue, next/advance, step back into history, restart-current (a no-op on
+  queue state), stop, current access, and borrowed iteration over upcoming.
+- `Prev` stays an **engine-level command**, not a queue operation. The engine
+  decides between restarting the current track and stepping back into history,
+  because that decision needs playback position (audio/state), which the queue
+  does not own. `Queue` exposes the two behaviours as separate methods —
+  `step_back()` (mutates history/current/upcoming) and a restart path that only
+  reads `current()` — never as one combined `queue.prev()` that guesses.
 - `Stop` clears current and history but keeps upcoming, matching today's
   behaviour.
 - `PlayQueue` clears history, replaces upcoming, and makes the first track
@@ -172,8 +178,8 @@ it actually does. Keep `EngineMsg::Enqueue(Track)` as append-to-end.
 | `Enqueue`                | append to the end of upcoming                       |
 | `Next`                   | current moves to history, front of upcoming becomes current |
 | auto-advance             | same as `Next`                                      |
-| `Prev` (restart current) | current/upcoming unchanged; position restarts       |
-| `Prev` (history step)    | current moves to front of upcoming, history tail becomes current |
+| `Prev` (restart current) | engine-level: queue untouched; engine restarts audio |
+| `Prev` (history step)    | engine-level: calls `Queue::step_back()` (current → upcoming front, history tail → current) |
 | `Stop`                   | current/history clear; upcoming retained            |
 
 `PlayNext` is reserved for a future “insert after current without interrupting”
@@ -369,13 +375,14 @@ the next open.
 - **Cover handles**: retained with each screen's `State`. The queue cache is
   bounded to the visible window; the now-playing cover is retained for the
   current track.
-- **Scroll position**: relevant for the queue list. Closing the panel currently
-  calls `pane_grid::State::close`, which drops the panel's widget `Tree`;
-  switching Queue ↔ Now-playing also replaces the body. Two options:
+- **Scroll position**: the screen states survive panel closes and tab switches,
+  but the current `view_panel` rebuilds only the selected body, so the queue's
+  widget `Tree` (and its offset) is dropped when it is hidden. This is deferred;
+  the two options when it matters are:
   1. keep both panel bodies mounted and toggle visibility (retains trees
      naturally);
-  2. mirror the scroll offset in `queue::State` and restore it when shown.
-  The plan assumes (1) unless it fights `pane_grid`; validate before deciding.
+  2. mirror the scroll offset in `queue::State` and restore it with
+     `scrollable::scroll_to` when shown.
 - The pinned current row does not scroll, so it needs no retention handling.
 
 ## 8. Visual design
@@ -483,8 +490,9 @@ the next open.
   - `Enqueue` appends without changing current.
   - `PlayNow` changes current and history but not upcoming.
   - `Next` and auto-advance pop the front and push the old current to history.
-  - History `Prev` pushes current back onto the queue front; restart `Prev`
-    changes neither.
+  - `Queue::step_back()` pushes current back onto the queue front; the
+    restart-current path (engine-level `Prev` past threshold) changes no queue
+    state.
   - `Stop` clears current/history but keeps upcoming.
   - IDs stay unique for duplicate tracks and survive reorder.
   - Mock and real engines produce the same queue transitions.

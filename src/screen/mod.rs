@@ -167,6 +167,10 @@ pub struct MainScreen {
     settings_dirty: bool,
     panel_open: bool,
     panel_screen: PanelScreen,
+    /// Right-panel screen states. Long-lived: toggling or switching panels
+    /// keeps their local cover/scroll state.
+    queue_screen: queue::State,
+    now_playing_screen: now_playing_panel::State,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,6 +284,10 @@ fn panel_fraction(sidebar_ratio: f32, inner_ratio: f32) -> f32 {
 #[derive(Debug, Clone)]
 pub enum Msg {
     ArtistsScreenMsg(artists::Msg),
+    /// Queue panel messages.
+    Queue(queue::Msg),
+    /// Now-playing panel messages.
+    NowPlayingPanel(now_playing_panel::Msg),
     /// UI intents routed into the engine.
     Engine(engine::EngineMsg),
     /// Engine events (from `Engine::update`) applied to the UI state.
@@ -341,6 +349,8 @@ impl MainScreen {
                 settings_dirty: false,
                 panel_open,
                 panel_screen,
+                queue_screen: queue::init(),
+                now_playing_screen: now_playing_panel::init(),
             },
             task.map(Msg::ArtistsScreenMsg),
         )
@@ -380,6 +390,50 @@ impl MainScreen {
                     Action::Emit(event) => self.handle_artists_event(event),
                 }
             }
+            Msg::Queue(inner) => {
+                let action = {
+                    let MainScreen {
+                        manager,
+                        engine,
+                        now_playing,
+                        queue_screen,
+                        ..
+                    } = self;
+                    let ctx = Ctx {
+                        manager: &*manager,
+                        engine: &*engine,
+                        now_playing: now_playing.as_ref(),
+                    };
+                    queue::update(queue_screen, ctx, inner)
+                };
+                match action {
+                    Action::None => Task::none(),
+                    Action::Task(task) => task.map(Msg::Queue),
+                    Action::Emit(event) => match event {},
+                }
+            }
+            Msg::NowPlayingPanel(inner) => {
+                let action = {
+                    let MainScreen {
+                        manager,
+                        engine,
+                        now_playing,
+                        now_playing_screen,
+                        ..
+                    } = self;
+                    let ctx = Ctx {
+                        manager: &*manager,
+                        engine: &*engine,
+                        now_playing: now_playing.as_ref(),
+                    };
+                    now_playing_panel::update(now_playing_screen, ctx, inner)
+                };
+                match action {
+                    Action::None => Task::none(),
+                    Action::Task(task) => task.map(Msg::NowPlayingPanel),
+                    Action::Emit(event) => match event {},
+                }
+            }
             Msg::Engine(msg) => {
                 // Mute-toggle bookkeeping: remember the pre-mute volume when
                 // silence is requested from a non-zero level, so the toggle
@@ -402,6 +456,12 @@ impl MainScreen {
                     .map(|event| self.apply_engine_event(event))
                     .collect();
                 tasks.push(engine_task.map(Msg::Engine));
+
+                // Panel cover prefetch: the queue data itself is live through
+                // `Ctx`, but covers are fetched from state transitions.
+                if self.panel_open {
+                    tasks.push(self.refresh_panel());
+                }
 
                 // Debounced settings write: at most once per engine tick while
                 // a divider is being dragged.
@@ -469,22 +529,24 @@ impl MainScreen {
             Msg::TogglePanel => {
                 self.panel_open = !self.panel_open;
                 self.ui_settings.panel_open = self.panel_open;
-                if self.panel_open {
+                let task = if self.panel_open {
                     self.panes.open_panel(
                         self.ui_settings.sidebar_ratio,
                         self.ui_settings.panel_ratio.max(PANEL_MIN_RATIO),
                     );
+                    self.refresh_panel()
                 } else {
                     self.panes.close_panel();
-                }
+                    Task::none()
+                };
                 self.save_settings();
-                Task::none()
+                task
             }
             Msg::SwitchPanel(screen) => {
                 self.panel_screen = screen;
                 self.ui_settings.panel_screen = PanelScreenConfig::from(screen);
                 self.save_settings();
-                Task::none()
+                self.refresh_panel()
             }
             Msg::Back => {
                 // The root entry is never popped: back from a root is a no-op.
@@ -547,6 +609,54 @@ impl MainScreen {
 }
 
 impl MainScreen {
+    /// Dispatch a `Refresh` to the panel screen that is currently shown.
+    fn refresh_panel(&mut self) -> Task<Msg> {
+        match self.panel_screen {
+            PanelScreen::Queue => {
+                let MainScreen {
+                    manager,
+                    engine,
+                    now_playing,
+                    queue_screen,
+                    ..
+                } = self;
+                let ctx = Ctx {
+                    manager: &*manager,
+                    engine: &*engine,
+                    now_playing: now_playing.as_ref(),
+                };
+                match queue::update(queue_screen, ctx, queue::Msg::Refresh) {
+                    Action::None => Task::none(),
+                    Action::Task(task) => task.map(Msg::Queue),
+                    Action::Emit(event) => match event {},
+                }
+            }
+            PanelScreen::NowPlaying => {
+                let MainScreen {
+                    manager,
+                    engine,
+                    now_playing,
+                    now_playing_screen,
+                    ..
+                } = self;
+                let ctx = Ctx {
+                    manager: &*manager,
+                    engine: &*engine,
+                    now_playing: now_playing.as_ref(),
+                };
+                match now_playing_panel::update(
+                    now_playing_screen,
+                    ctx,
+                    now_playing_panel::Msg::Refresh,
+                ) {
+                    Action::None => Task::none(),
+                    Action::Task(task) => task.map(Msg::NowPlayingPanel),
+                    Action::Emit(event) => match event {},
+                }
+            }
+        }
+    }
+
     fn panel_split(&self) -> Option<pane_grid::Split> {
         self.panes.panel_split
     }
@@ -665,9 +775,16 @@ impl MainScreen {
         ]
         .spacing(4);
 
+        let ctx = Ctx {
+            manager: &self.manager,
+            engine: &self.engine,
+            now_playing: self.now_playing.as_ref(),
+        };
         let body: Element<'_, Msg> = match self.panel_screen {
-            PanelScreen::Queue => placeholder("Queue"),
-            PanelScreen::NowPlaying => placeholder("Now playing"),
+            PanelScreen::Queue => queue::view(&self.queue_screen, ctx).map(Msg::Queue),
+            PanelScreen::NowPlaying => {
+                now_playing_panel::view(&self.now_playing_screen, ctx).map(Msg::NowPlayingPanel)
+            }
         };
 
         widget::column![
@@ -826,7 +943,6 @@ impl MainScreen {
             EngineEvent::Paused => {}
             EngineEvent::Resumed => {}
             EngineEvent::UpdateNowPlaying => {}
-            EngineEvent::QueueChanged => {}
             EngineEvent::Error(_e) => {}
         }
 

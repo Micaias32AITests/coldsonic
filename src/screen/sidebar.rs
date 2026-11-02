@@ -17,10 +17,27 @@ pub fn view<'a, F>(on_press: F) -> Element<'a, crate::screen::Msg>
 where
     F: Fn(Msg) -> crate::screen::Msg + 'a,
 {
-    fn nav_style(theme: &Theme, _status: button::Status) -> button::Style {
+    fn nav_style(theme: &Theme, status: button::Status) -> button::Style {
+        let palette = theme.extended_palette();
+
+        // The sidebar sits on the base background, so use the base palette's
+        // text color. `secondary.base.text` is meant to contrast with the
+        // secondary surface and reads far too dim here.
+        let (background, text_color) = match status {
+            button::Status::Hovered => (
+                Some(palette.background.weak.color.into()),
+                palette.background.weak.text,
+            ),
+            button::Status::Pressed => (
+                Some(palette.background.strong.color.into()),
+                palette.background.strong.text,
+            ),
+            _ => (None, palette.background.base.text),
+        };
+
         button::Style {
-            background: Some(iced::Background::Color(Color::TRANSPARENT)),
-            text_color: theme.extended_palette().secondary.base.text,
+            background,
+            text_color,
             border: iced::Border::default(),
             shadow: iced::Shadow::default(),
             snap: false,

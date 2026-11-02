@@ -129,6 +129,50 @@ impl MemoryStore {
         self.artists.clone()
     }
 
+    pub(super) async fn albums(&self) -> Vec<Album> {
+        let mut albums: Vec<Album> = self.albums.values().cloned().collect();
+        albums.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then_with(|| {
+                    a.artist
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .cmp(&b.artist.as_deref().unwrap_or_default().to_lowercase())
+                })
+                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+        });
+        albums
+    }
+
+    pub(super) async fn tracks(&self) -> Vec<Track> {
+        let mut tracks: Vec<Track> = self.tracks.values().cloned().collect();
+        tracks.sort_by(|a, b| {
+            a.title
+                .to_lowercase()
+                .cmp(&b.title.to_lowercase())
+                .then_with(|| {
+                    a.artist
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .cmp(&b.artist.as_deref().unwrap_or_default().to_lowercase())
+                })
+                .then_with(|| {
+                    a.album
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .cmp(&b.album.as_deref().unwrap_or_default().to_lowercase())
+                })
+                .then_with(|| a.track_no.cmp(&b.track_no))
+                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+        });
+        tracks
+    }
+
     pub(super) async fn artist(&self, id: &ArtistId) -> Option<ArtistDetail> {
         let artist = self.artists.iter().find(|a| a.id == *id)?.clone();
         let albums = self

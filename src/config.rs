@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::PathBuf;
 
 use anyhow::{Context, bail};
@@ -95,12 +96,31 @@ pub enum PanelStartup {
     StartOpened,
 }
 
+impl fmt::Display for PanelStartup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PersistState => f.write_str("Remember last session"),
+            Self::StartClosed => f.write_str("Always start closed"),
+            Self::StartOpened => f.write_str("Always start open"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum PanelScreenConfig {
     #[default]
     Queue,
     NowPlaying,
+}
+
+impl fmt::Display for PanelScreenConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Queue => f.write_str("Queue"),
+            Self::NowPlaying => f.write_str("Now playing"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

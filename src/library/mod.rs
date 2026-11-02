@@ -135,6 +135,18 @@ impl Library {
         }
     }
 
+    pub async fn albums(&self) -> Result<Vec<Album>, LibraryError> {
+        match self {
+            Library::Offline(library) => library.albums().await,
+        }
+    }
+
+    pub async fn tracks(&self) -> Result<Vec<Track>, LibraryError> {
+        match self {
+            Library::Offline(library) => library.tracks().await,
+        }
+    }
+
     pub async fn artist(&self, id: &ArtistId) -> Result<ArtistDetail, LibraryError> {
         match self {
             Library::Offline(library) => library.artist(id).await,

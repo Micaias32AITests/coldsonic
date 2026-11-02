@@ -50,6 +50,7 @@ pub enum Msg {
 /// Events this screen raises to its parent (`MainScreen`, the coordinator).
 #[derive(Debug, Clone)]
 pub enum Event {
+    ArtistClicked(ArtistId),
     PlayShuffled(ArtistId),
 }
 
@@ -110,7 +111,7 @@ pub fn update(state: &mut State, ctx: Ctx<'_>, msg: Msg) -> Action<Msg, Event> {
         }
         Msg::ArtistClicked(id) => {
             debug!(id = %id.as_str(), "artist clicked");
-            Action::none()
+            Action::emit(Event::ArtistClicked(id))
         }
         Msg::CoverLoaded(id, result) => {
             let Some(row) = state

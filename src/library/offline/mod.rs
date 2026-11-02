@@ -14,7 +14,8 @@ use std::path::PathBuf;
 use bytes::Bytes;
 
 use crate::library::{
-    AlbumDetail, AlbumId, Artist, ArtistDetail, ArtistId, CoverId, LibraryError, ScanMode, TrackId,
+    Album, AlbumDetail, AlbumId, Artist, ArtistDetail, ArtistId, CoverId, LibraryError, ScanMode,
+    Track, TrackId,
 };
 
 use store::MemoryStore;
@@ -52,6 +53,14 @@ impl OfflineLibrary {
 
     pub async fn artists(&self) -> Result<Vec<Artist>, LibraryError> {
         Ok(self.store.artists().await)
+    }
+
+    pub async fn albums(&self) -> Result<Vec<Album>, LibraryError> {
+        Ok(self.store.albums().await)
+    }
+
+    pub async fn tracks(&self) -> Result<Vec<Track>, LibraryError> {
+        Ok(self.store.tracks().await)
     }
 
     pub async fn artist(&self, id: &ArtistId) -> Result<ArtistDetail, LibraryError> {

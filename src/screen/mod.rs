@@ -74,6 +74,8 @@ use crate::prelude::*;
 use crate::widget::stack::{StackEntry, stack};
 
 pub mod album_detail;
+pub mod albums;
+pub mod all_tracks;
 pub mod artist_detail;
 pub mod artists;
 pub mod library_setup;
@@ -130,12 +132,12 @@ pub enum Route {
 #[derive(Debug)]
 pub enum SubScreen {
     Artists(artists::State),
-    ArtistDetail(ArtistId),
-    AlbumDetail(AlbumId),
-    Albums,
-    AllTracks,
+    ArtistDetail(artist_detail::State),
+    AlbumDetail(album_detail::State),
+    Albums(albums::State),
+    AllTracks(all_tracks::State),
     Playlists,
-    Settings,
+    Settings(settings::State),
 }
 
 #[derive(Debug)]
@@ -284,6 +286,11 @@ fn panel_fraction(sidebar_ratio: f32, inner_ratio: f32) -> f32 {
 #[derive(Debug, Clone)]
 pub enum Msg {
     ArtistsScreenMsg(artists::Msg),
+    ArtistDetailMsg(artist_detail::Msg),
+    AlbumDetailMsg(album_detail::Msg),
+    AlbumsScreenMsg(albums::Msg),
+    AllTracksScreenMsg(all_tracks::Msg),
+    SettingsScreenMsg(settings::Msg),
     /// Queue panel messages.
     Queue(queue::Msg),
     /// Now-playing panel messages.
@@ -388,6 +395,112 @@ impl MainScreen {
                     Action::None => Task::none(),
                     Action::Task(task) => task.map(Msg::ArtistsScreenMsg),
                     Action::Emit(event) => self.handle_artists_event(event),
+                }
+            }
+            Msg::ArtistDetailMsg(inner) => {
+                let action = {
+                    let MainScreen {
+                        entries, manager, ..
+                    } = self;
+
+                    let Some(entry) = entries.last_mut() else {
+                        return Task::none();
+                    };
+                    let SubScreen::ArtistDetail(screen) = &mut entry.value.screen else {
+                        return Task::none();
+                    };
+
+                    artist_detail::update(screen, &*manager, inner)
+                };
+
+                match action {
+                    Action::None => Task::none(),
+                    Action::Task(task) => task.map(Msg::ArtistDetailMsg),
+                    Action::Emit(event) => self.handle_artist_detail_event(event),
+                }
+            }
+            Msg::AlbumDetailMsg(inner) => {
+                let action = {
+                    let MainScreen {
+                        entries, manager, ..
+                    } = self;
+
+                    let Some(entry) = entries.last_mut() else {
+                        return Task::none();
+                    };
+                    let SubScreen::AlbumDetail(screen) = &mut entry.value.screen else {
+                        return Task::none();
+                    };
+
+                    album_detail::update(screen, &*manager, inner)
+                };
+
+                match action {
+                    Action::None => Task::none(),
+                    Action::Task(task) => task.map(Msg::AlbumDetailMsg),
+                    Action::Emit(event) => self.handle_album_detail_event(event),
+                }
+            }
+            Msg::AlbumsScreenMsg(inner) => {
+                let action = {
+                    let MainScreen {
+                        entries, manager, ..
+                    } = self;
+
+                    let Some(entry) = entries.last_mut() else {
+                        return Task::none();
+                    };
+                    let SubScreen::Albums(screen) = &mut entry.value.screen else {
+                        return Task::none();
+                    };
+
+                    albums::update(screen, &*manager, inner)
+                };
+
+                match action {
+                    Action::None => Task::none(),
+                    Action::Task(task) => task.map(Msg::AlbumsScreenMsg),
+                    Action::Emit(event) => self.handle_albums_event(event),
+                }
+            }
+            Msg::AllTracksScreenMsg(inner) => {
+                let action = {
+                    let MainScreen {
+                        entries, manager, ..
+                    } = self;
+
+                    let Some(entry) = entries.last_mut() else {
+                        return Task::none();
+                    };
+                    let SubScreen::AllTracks(screen) = &mut entry.value.screen else {
+                        return Task::none();
+                    };
+
+                    all_tracks::update(screen, &*manager, inner)
+                };
+
+                match action {
+                    Action::None => Task::none(),
+                    Action::Task(task) => task.map(Msg::AllTracksScreenMsg),
+                    Action::Emit(event) => self.handle_all_tracks_event(event),
+                }
+            }
+            Msg::SettingsScreenMsg(inner) => {
+                let action = {
+                    let Some(entry) = self.entries.last_mut() else {
+                        return Task::none();
+                    };
+                    let SubScreen::Settings(screen) = &mut entry.value.screen else {
+                        return Task::none();
+                    };
+
+                    settings::update(screen, inner)
+                };
+
+                match action {
+                    Action::None => Task::none(),
+                    Action::Task(task) => task.map(Msg::SettingsScreenMsg),
+                    Action::Emit(event) => self.handle_settings_event(event),
                 }
             }
             Msg::Queue(inner) => {
@@ -527,27 +640,10 @@ impl MainScreen {
             }
             Msg::Sidebar(sidebar_msg) => self.handle_sidebar(sidebar_msg),
             Msg::TogglePanel => {
-                self.panel_open = !self.panel_open;
-                self.ui_settings.panel_open = self.panel_open;
-                let task = if self.panel_open {
-                    self.panes.open_panel(
-                        self.ui_settings.sidebar_ratio,
-                        self.ui_settings.panel_ratio.max(PANEL_MIN_RATIO),
-                    );
-                    self.refresh_panel()
-                } else {
-                    self.panes.close_panel();
-                    Task::none()
-                };
-                self.save_settings();
-                task
+                let open = !self.panel_open;
+                self.set_panel_open(open)
             }
-            Msg::SwitchPanel(screen) => {
-                self.panel_screen = screen;
-                self.ui_settings.panel_screen = PanelScreenConfig::from(screen);
-                self.save_settings();
-                self.refresh_panel()
-            }
+            Msg::SwitchPanel(screen) => self.set_panel_screen(screen),
             Msg::Back => {
                 // The root entry is never popped: back from a root is a no-op.
                 if self.entries.len() > 1 {
@@ -571,14 +667,63 @@ impl MainScreen {
 
     fn handle_artists_event(&mut self, event: artists::Event) -> Task<Msg> {
         match event {
-            artists::Event::PlayShuffled(id) => {
-                let manager = self.manager.clone();
-                Task::perform(collect_shuffled_songs(manager, id), |res| match res {
-                    Ok(tracks) => Msg::Engine(EngineMsg::PlayQueue(tracks)),
-                    Err(err) => Msg::EngineEvent(EngineEvent::Error(err.to_string())),
-                })
+            artists::Event::ArtistClicked(id) => self.push_route(Route::ArtistDetail(id)),
+            artists::Event::PlayShuffled(id) => self.play_shuffled(id),
+        }
+    }
+
+    fn handle_artist_detail_event(&mut self, event: artist_detail::Event) -> Task<Msg> {
+        match event {
+            artist_detail::Event::AlbumClicked(id) => self.push_route(Route::AlbumDetail(id)),
+            artist_detail::Event::PlayShuffled(id) => self.play_shuffled(id),
+        }
+    }
+
+    fn handle_album_detail_event(&mut self, event: album_detail::Event) -> Task<Msg> {
+        match event {
+            album_detail::Event::PlayQueue(tracks) => {
+                Task::done(Msg::Engine(EngineMsg::PlayQueue(tracks)))
+            }
+            album_detail::Event::PlayTrack(track) => {
+                Task::done(Msg::Engine(EngineMsg::PlayNow(track)))
             }
         }
+    }
+
+    fn handle_albums_event(&mut self, event: albums::Event) -> Task<Msg> {
+        match event {
+            albums::Event::AlbumClicked(id) => self.push_route(Route::AlbumDetail(id)),
+        }
+    }
+
+    fn handle_all_tracks_event(&mut self, event: all_tracks::Event) -> Task<Msg> {
+        match event {
+            all_tracks::Event::PlayTrack(track) => {
+                Task::done(Msg::Engine(EngineMsg::PlayNow(track)))
+            }
+        }
+    }
+
+    fn handle_settings_event(&mut self, event: settings::Event) -> Task<Msg> {
+        match event {
+            settings::Event::SetPanelStartup(value) => {
+                self.ui_settings.panel_startup = value;
+                self.save_settings();
+                Task::none()
+            }
+            settings::Event::SetPanelScreen(value) => {
+                self.set_panel_screen(PanelScreen::from(value))
+            }
+            settings::Event::SetPanelOpen(open) => self.set_panel_open(open),
+        }
+    }
+
+    fn play_shuffled(&self, id: ArtistId) -> Task<Msg> {
+        let manager = self.manager.clone();
+        Task::perform(collect_shuffled_songs(manager, id), |res| match res {
+            Ok(tracks) => Msg::Engine(EngineMsg::PlayQueue(tracks)),
+            Err(err) => Msg::EngineEvent(EngineEvent::Error(err.to_string())),
+        })
     }
 
     pub fn view(&self) -> Element<'_, Msg> {
@@ -661,6 +806,40 @@ impl MainScreen {
         self.panes.panel_split
     }
 
+    fn set_panel_open(&mut self, open: bool) -> Task<Msg> {
+        if self.panel_open == open {
+            return Task::none();
+        }
+
+        self.panel_open = open;
+        self.ui_settings.panel_open = open;
+
+        let task = if open {
+            self.panes.open_panel(
+                self.ui_settings.sidebar_ratio,
+                self.ui_settings.panel_ratio.max(PANEL_MIN_RATIO),
+            );
+            self.refresh_panel()
+        } else {
+            self.panes.close_panel();
+            Task::none()
+        };
+
+        self.save_settings();
+        task
+    }
+
+    fn set_panel_screen(&mut self, screen: PanelScreen) -> Task<Msg> {
+        self.panel_screen = screen;
+        self.ui_settings.panel_screen = PanelScreenConfig::from(screen);
+        self.save_settings();
+        if self.panel_open {
+            self.refresh_panel()
+        } else {
+            Task::none()
+        }
+    }
+
     fn save_settings(&mut self) {
         if let Err(err) = config::save_ui_settings(&self.ui_settings) {
             warn!(%err, "failed to save settings.toml");
@@ -680,12 +859,30 @@ impl MainScreen {
                 let (state, task) = artists::init(self.manager.clone());
                 (SubScreen::Artists(state), task.map(Msg::ArtistsScreenMsg))
             }
-            Route::ArtistDetail(id) => (SubScreen::ArtistDetail(id.clone()), Task::none()),
-            Route::AlbumDetail(id) => (SubScreen::AlbumDetail(id.clone()), Task::none()),
-            Route::Albums => (SubScreen::Albums, Task::none()),
-            Route::AllTracks => (SubScreen::AllTracks, Task::none()),
+            Route::ArtistDetail(id) => {
+                let (state, task) = artist_detail::init(id.clone(), self.manager.clone());
+                (
+                    SubScreen::ArtistDetail(state),
+                    task.map(Msg::ArtistDetailMsg),
+                )
+            }
+            Route::AlbumDetail(id) => {
+                let (state, task) = album_detail::init(id.clone(), self.manager.clone());
+                (SubScreen::AlbumDetail(state), task.map(Msg::AlbumDetailMsg))
+            }
+            Route::Albums => {
+                let (state, task) = albums::init(self.manager.clone());
+                (SubScreen::Albums(state), task.map(Msg::AlbumsScreenMsg))
+            }
+            Route::AllTracks => {
+                let (state, task) = all_tracks::init(self.manager.clone());
+                (
+                    SubScreen::AllTracks(state),
+                    task.map(Msg::AllTracksScreenMsg),
+                )
+            }
             Route::Playlists => (SubScreen::Playlists, Task::none()),
-            Route::Settings => (SubScreen::Settings, Task::none()),
+            Route::Settings => (SubScreen::Settings(settings::init()), Task::none()),
         }
     }
 
@@ -730,7 +927,7 @@ impl MainScreen {
                     .iter_mut()
                     .find(|entry| entry.value.route == Route::Settings)
                 {
-                    entry.value.screen = SubScreen::Settings;
+                    entry.value.screen = SubScreen::Settings(settings::init());
                     Task::none()
                 } else {
                     self.push_route(Route::Settings)
@@ -749,12 +946,17 @@ impl MainScreen {
     fn view_route<'a>(&'a self, entry: &'a ScreenEntry) -> Element<'a, Msg> {
         match &entry.screen {
             SubScreen::Artists(screen) => artists::view(screen).map(Msg::ArtistsScreenMsg),
-            SubScreen::ArtistDetail(id) => placeholder(format!("Artist {}", id.as_str())),
-            SubScreen::AlbumDetail(id) => placeholder(format!("Album {}", id.as_str())),
-            SubScreen::Albums => placeholder("Albums"),
-            SubScreen::AllTracks => placeholder("Tracks"),
+            SubScreen::ArtistDetail(screen) => {
+                artist_detail::view(screen).map(Msg::ArtistDetailMsg)
+            }
+            SubScreen::AlbumDetail(screen) => album_detail::view(screen).map(Msg::AlbumDetailMsg),
+            SubScreen::Albums(screen) => albums::view(screen).map(Msg::AlbumsScreenMsg),
+            SubScreen::AllTracks(screen) => all_tracks::view(screen).map(Msg::AllTracksScreenMsg),
             SubScreen::Playlists => placeholder("Playlists"),
-            SubScreen::Settings => placeholder("Settings"),
+            SubScreen::Settings(screen) => {
+                settings::view(screen, &self.ui_settings, self.panel_open)
+                    .map(Msg::SettingsScreenMsg)
+            }
         }
     }
 
@@ -831,7 +1033,10 @@ impl MainScreen {
             .color([0.6, 0.6, 0.6]),
         ]
         .spacing(2);
-        let left = row![cover, info].align_y(Center).spacing(8);
+        let left = row![cover, info]
+            .align_y(Center)
+            .spacing(8)
+            .width(FillPortion(1));
 
         // --- Center: transport + progress -----------------------------------
         let play_pause = match np.map(|n| n.state) {
@@ -875,7 +1080,7 @@ impl MainScreen {
         .align_y(Center);
 
         let center = widget::column![transport, progress]
-            .width(Fill)
+            .width(FillPortion(1))
             .align_x(Center)
             .spacing(8);
 
@@ -896,11 +1101,13 @@ impl MainScreen {
             .step(0.01_f32)
             .width(100);
         let right = row![
+            space().width(Fill),
             mute_button,
             volume_slider,
             button(text("Panel")).on_press(Msg::TogglePanel)
         ]
         .align_y(Center)
+        .width(FillPortion(1))
         .spacing(8);
 
         row![left, center, right]

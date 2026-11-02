@@ -118,6 +118,69 @@ impl Manager {
         Ok(artists)
     }
 
+    /// Concatenates every library's albums, prefixes their ids and covers, and
+    /// sorts by album name (case-insensitive), then artist for ties.
+    pub async fn albums(&self) -> Result<Vec<Album>, LibraryError> {
+        let mut albums = Vec::new();
+        for opened in &self.libraries {
+            let prefix = opened.config.identifier();
+            for mut album in opened.library.albums().await? {
+                re_prefix_album(prefix, &mut album);
+                albums.push(album);
+            }
+        }
+        albums.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then_with(|| {
+                    a.artist
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .cmp(&b.artist.as_deref().unwrap_or_default().to_lowercase())
+                })
+                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+        });
+        Ok(albums)
+    }
+
+    /// Concatenates every library's tracks, prefixes their ids and covers, and
+    /// sorts by title (case-insensitive), then artist, album, track number, and
+    /// id for stable ties.
+    pub async fn tracks(&self) -> Result<Vec<Track>, LibraryError> {
+        let mut tracks = Vec::new();
+        for opened in &self.libraries {
+            let prefix = opened.config.identifier();
+            for mut track in opened.library.tracks().await? {
+                re_prefix_track(prefix, &mut track);
+                tracks.push(track);
+            }
+        }
+        tracks.sort_by(|a, b| {
+            a.title
+                .to_lowercase()
+                .cmp(&b.title.to_lowercase())
+                .then_with(|| {
+                    a.artist
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .cmp(&b.artist.as_deref().unwrap_or_default().to_lowercase())
+                })
+                .then_with(|| {
+                    a.album
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .cmp(&b.album.as_deref().unwrap_or_default().to_lowercase())
+                })
+                .then_with(|| a.track_no.cmp(&b.track_no))
+                .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+        });
+        Ok(tracks)
+    }
+
     pub async fn artist(&self, id: &ArtistId) -> Result<ArtistDetail, LibraryError> {
         let (opened, rest) = route(&self.libraries, id.as_str())?;
         let mut detail = opened.library.artist(&ArtistId::new(rest)).await?;
@@ -244,6 +307,24 @@ mod tests {
         let artists = smol::block_on(manager.artists()).expect("artists");
         assert!(!artists.is_empty());
         assert!(artists.iter().all(|a| a.id.as_str().starts_with("alpha:")));
+
+        let albums = smol::block_on(manager.albums()).expect("albums");
+        assert!(!albums.is_empty());
+        assert!(albums.iter().all(|a| a.id.as_str().starts_with("alpha:")));
+        assert!(albums.iter().all(|a| {
+            a.cover
+                .as_ref()
+                .is_none_or(|c| c.as_str().starts_with("alpha:"))
+        }));
+
+        let tracks = smol::block_on(manager.tracks()).expect("tracks");
+        assert!(!tracks.is_empty());
+        assert!(tracks.iter().all(|t| t.id.as_str().starts_with("alpha:")));
+        assert!(tracks.iter().all(|t| {
+            t.cover
+                .as_ref()
+                .is_none_or(|c| c.as_str().starts_with("alpha:"))
+        }));
     }
 
     #[test]
@@ -271,6 +352,52 @@ mod tests {
         assert_eq!(artists[0].id.as_str(), "beta:Delta Artist");
         assert_eq!(artists[1].name, "Gamma Artist");
         assert_eq!(artists[1].id.as_str(), "alpha:Gamma Artist");
+    }
+
+    #[test]
+    fn albums_and_tracks_merge_sorted_with_prefixed_ids() {
+        let configs = vec![
+            offline(
+                "Alpha",
+                "alpha",
+                fixture("manager-a"),
+                true,
+                ScanMode::Folders,
+            ),
+            offline(
+                "Beta",
+                "beta",
+                fixture("manager-b"),
+                true,
+                ScanMode::Folders,
+            ),
+        ];
+        let manager = open(&configs);
+
+        let albums = smol::block_on(manager.albums()).expect("albums");
+        assert_eq!(albums.len(), 2);
+        assert_eq!(albums[0].name, "Album");
+        assert_eq!(albums[0].id.as_str(), "beta:Delta Artist\u{0}Album");
+        assert_eq!(albums[1].name, "Gamma Album");
+        assert_eq!(albums[1].id.as_str(), "alpha:Gamma Artist\u{0}Gamma Album");
+        assert!(albums.iter().all(|album| album.song_count == 1));
+
+        let tracks = smol::block_on(manager.tracks()).expect("tracks");
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].title, "One");
+        assert_eq!(
+            tracks[0].id.as_str(),
+            "alpha:Gamma Artist/Gamma Album/01 - One.mp3"
+        );
+        assert_eq!(tracks[1].title, "Two");
+        assert_eq!(
+            tracks[1].id.as_str(),
+            "beta:Delta Artist/Album/01 - Two.mp3"
+        );
+        assert_eq!(
+            tracks[0].cover.as_ref().map(|cover| cover.as_str()),
+            Some("alpha:Gamma Artist/Gamma Album")
+        );
     }
 
     #[test]

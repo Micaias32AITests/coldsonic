@@ -131,7 +131,7 @@ iced does not require them.
   - New msgs: `Msg::Engine(engine::EngineMsg)`, `Msg::Tick`.
   - `MainScreen::subscription` (public; `main.rs` is a separate crate):
     `Subscription::run` with a static builder — `iced::stream::channel` looping
-    `smol::Timer::after(250ms)` → `Msg::Tick`. No engine data crosses into the
+    `tokio::time::sleep(250ms)` → `Msg::Tick`. No engine data crosses into the
     subscription; `update` reads the engine. Child subscriptions, if any, are
     `pub(in crate::screen)` and batched here.
   - `update`: route `Msg::Engine` through `engine.update(...).handle(...)`;
@@ -217,7 +217,7 @@ iced does not require them.
     then **while total size > max, evict the least-recently-accessed entry**
     (delete file + drop from manifest).
   - `invalidate(namespace, key)`.
-- **`src/engine/fetch.rs`:** `stream_track(manager: Arc<Manager>, cache, &Track)` —
+- **`src/engine/fetch.rs`:** `stream_track(handle: ManagerHandle, cache, &Track)` —
   `cache.get("stream", &track.id)` → on hit return; on miss `manager.track_bytes(&track.id)` → `cache.put` → return.
 - **Corruption fallback:** if `Decoder` fails on cached bytes, the engine
   `invalidate`s + refetches once (`real.rs` retries with a per-track attempt

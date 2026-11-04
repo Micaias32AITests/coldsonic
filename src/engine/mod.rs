@@ -10,13 +10,12 @@ pub mod player;
 pub mod queue;
 pub mod real;
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use iced::Task;
 
 use crate::Action;
-use crate::library::Manager;
+use crate::library::ManagerHandle;
 
 pub use queue::{Queue, QueueEntry, QueueEntryId};
 
@@ -118,8 +117,8 @@ impl Engine {
         Self::Mock(mock::MockEngine::new())
     }
 
-    pub fn real(manager: Arc<Manager>) -> Self {
-        Self::Real(real::RealEngine::open(manager))
+    pub fn real(handle: ManagerHandle) -> Self {
+        Self::Real(real::RealEngine::open(handle))
     }
 
     /// Route a UI command into the engine. The returned

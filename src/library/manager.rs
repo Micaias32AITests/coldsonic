@@ -1,34 +1,48 @@
 //! Manager — the only library seam the UI touches.
 //!
-//! Screens hold an `Arc<Manager>` and ask it about artists/albums/tracks/
-//! covers; providers never reach the screens, and nothing above the manager
-//! knows how many libraries exist or how they store data. The manager opens
-//! every enabled config up front, routes prefixed ids back down by pure
-//! string work, re-prefixes everything on the way out, and owns the single
-//! cache seam where sqlite will later slot in — the merge policy lives only
-//! here.
+//! `MainScreen` owns a [`Manager`] by value. Async work (scans, the engine,
+//! screen fetches) gets a [`ManagerHandle`]: one `Arc` over an immutable
+//! catalog of pools, roots, and the event sender. A handle can read metadata
+//! but cannot mutate app state.
+//!
+//! The manager opens every enabled library's database eagerly. Opening is
+//! fast and performs no scanning; startup checks and scans run later as iced
+//! tasks. Ids are unprefixed inside a library database and prefixed on the way
+//! out, so routing a query back down is pure string work.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::sync::Arc;
 
 use bytes::Bytes;
+use sqlx::SqlitePool;
+use tokio::sync::broadcast;
 
+use crate::config;
+use crate::library::db::global::GlobalDb;
+use crate::library::db::library::{LibraryDb, ScanSignature};
+use crate::library::db::{global_db_path, library_cover_cache_dir, library_db_path};
 use crate::library::is_valid_id;
+use crate::library::offline::{OfflineHandle, OfflineLibrary};
 
-use super::offline::OfflineLibrary;
 use super::{
     Album, AlbumDetail, AlbumId, Artist, ArtistDetail, ArtistId, CoverId, Library, LibraryConfig,
-    LibraryError, Track, TrackId,
+    LibraryError, PlayHistoryEntry, Playlist, PlaylistTrack, Track, TrackId,
 };
 
 #[derive(Debug)]
 pub struct Manager {
-    /// Enabled entries only. Looked up by `LibraryConfig` identifier;
-    /// that identifier is the id prefix. Vec, not map — order documents
-    /// config order for debugging, and lookups are by string anyway.
+    catalog: Arc<Catalog>,
+    /// Monotonic, bumped on every successful library update.
+    revision: u64,
+    scan_state: HashMap<String, ScanState>,
+}
+
+#[derive(Debug)]
+struct Catalog {
     libraries: Vec<Opened>,
-    /// Never read today; sqlite slots in here later.
-    #[allow(dead_code)]
-    cache: CacheStore,
+    global: GlobalDb,
+    events: broadcast::Sender<ManagerEvent>,
 }
 
 #[derive(Debug)]
@@ -37,20 +51,70 @@ struct Opened {
     library: Library,
 }
 
-/// The one cache seam, above every provider. Sqlite slots in here later
-/// (metadata records + cover/stream blobs); nothing else in the codebase
-/// needs a cache hook.
-#[derive(Debug, Clone, Copy)]
-pub enum CacheStore {
-    None,
+/// Read-only routing snapshot handed to tasks and the engine.
+#[derive(Debug, Clone)]
+pub struct ManagerHandle(Arc<Catalog>);
+
+#[derive(Debug, Clone)]
+pub enum LibraryHandle {
+    Offline(OfflineHandle),
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanPlan {
+    pub library: String,
+    pub config: LibraryConfig,
+    pub handle: LibraryHandle,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanOutcome {
+    pub library: String,
+    pub result: Result<(), String>,
+}
+
+/// The manager's only outward-facing event surface.
+#[derive(Debug, Clone)]
+pub enum ManagerEvent {
+    LibraryScanStarted {
+        library: String,
+    },
+    LibraryUpdated {
+        library: String,
+        revision: u64,
+    },
+    LibraryScanFailed {
+        library: String,
+        error: String,
+    },
+    /// The subscriber fell behind the broadcast ring. The UI should ignore
+    /// the missed details and reload the visible screen.
+    Lagged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanState {
+    Idle,
+    Scanning,
+    Dirty,
 }
 
 impl Manager {
-    /// Opens every enabled library, in order. Duplicate or malformed
-    /// identifiers are rejected before any scanning starts; an enabled entry
-    /// that fails to open fails the whole `open` with an error naming it —
-    /// a typo'd root must be loud, not a silently smaller library.
+    /// Open every enabled library using the app's real data/cache dirs.
     pub async fn open(library_configs: &[LibraryConfig]) -> Result<Manager, LibraryError> {
+        let data_dir = config::data_dir()
+            .ok_or_else(|| LibraryError::Invalid("no data directory on this system".into()))?;
+        let cache_dir = config::cache_dir()
+            .ok_or_else(|| LibraryError::Invalid("no cache directory on this system".into()))?;
+        Self::open_at(library_configs, &data_dir, &cache_dir).await
+    }
+
+    /// Test-only constructor: never touches the real user data/cache dirs.
+    pub async fn open_at(
+        library_configs: &[LibraryConfig],
+        data_dir: &Path,
+        cache_dir: &Path,
+    ) -> Result<Manager, LibraryError> {
         let mut seen = HashSet::new();
         for config in library_configs {
             let id = config.identifier();
@@ -59,12 +123,14 @@ impl Manager {
                     "invalid library identifier '{id}': expected [a-z0-9-]+"
                 )));
             }
-            if !seen.insert(id) {
+            if !seen.insert(id.to_string()) {
                 return Err(LibraryError::Invalid(format!(
                     "duplicate library identifier '{id}'"
                 )));
             }
         }
+
+        let global = GlobalDb::open(&global_db_path(data_dir)).await?;
 
         let mut libraries = Vec::new();
         for config in library_configs {
@@ -81,31 +147,278 @@ impl Manager {
                 continue;
             }
             tracing::info!(%id, %name, root = %root.display(), ?scan, "opening library");
-            let library = OfflineLibrary::open(root.clone(), *scan, never_split.clone())
-                .await
-                .map_err(|err| {
-                    LibraryError::Invalid(format!(
-                        "failed to open library '{name}' (id '{id}'): {err}"
-                    ))
-                })?;
-            tracing::info!(%id, "library opened");
+            let db_path = library_db_path(data_dir, id);
+            let db = LibraryDb::open(&db_path).await.map_err(|err| {
+                LibraryError::Invalid(format!(
+                    "failed to open library '{name}' (id '{id}'): {err}"
+                ))
+            })?;
+            db.apply_signature(&ScanSignature::from_config(config))
+                .await?;
+            let cache_dir = library_cover_cache_dir(cache_dir, id);
+            let offline = OfflineLibrary::new(
+                OfflineHandle {
+                    identifier: id.clone(),
+                    root: root.clone(),
+                    pool: db.pool.clone(),
+                    cache_dir,
+                },
+                *scan,
+                never_split.clone(),
+            );
             libraries.push(Opened {
                 config: config.clone(),
-                library: Library::Offline(library),
+                library: Library::Offline(offline),
             });
         }
+
+        let (events, _) = broadcast::channel(64);
         Ok(Manager {
-            libraries,
-            cache: CacheStore::None,
+            catalog: Arc::new(Catalog {
+                libraries,
+                global,
+                events,
+            }),
+            revision: 0,
+            scan_state: HashMap::new(),
         })
     }
 
-    /// Concatenates every library's artists, prefixes each id, and sorts by
-    /// name case-insensitively (stable for ties). Same-named artists from
-    /// different libraries stay separate rows — merging them is a
-    /// display-policy question for later, and this is the only place it can
-    /// change.
+    /// Clone one `Arc`. This is the only refcount bump a task needs.
+    pub fn handle(&self) -> ManagerHandle {
+        ManagerHandle(Arc::clone(&self.catalog))
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<ManagerEvent> {
+        self.catalog.events.subscribe()
+    }
+
+    /// One plan per opened library, in config order.
+    pub fn scan_plan(&self) -> Vec<ScanPlan> {
+        self.catalog.scan_plan()
+    }
+
+    pub fn begin_scan(&mut self, library: &str) -> bool {
+        match self.scan_state.get(library).copied() {
+            Some(ScanState::Scanning) => {
+                self.scan_state
+                    .insert(library.to_string(), ScanState::Dirty);
+                false
+            }
+            _ => {
+                self.scan_state
+                    .insert(library.to_string(), ScanState::Scanning);
+                let _ = self.catalog.events.send(ManagerEvent::LibraryScanStarted {
+                    library: library.to_string(),
+                });
+                true
+            }
+        }
+    }
+
+    /// Apply a finished scan. Returns `true` when a follow-up scan is needed
+    /// because a change arrived while the scan was running.
+    pub fn finish_scan(&mut self, library: &str, result: Result<(), String>) -> bool {
+        let was_dirty = self
+            .scan_state
+            .get(library)
+            .is_some_and(|state| *state == ScanState::Dirty);
+        self.scan_state.insert(library.to_string(), ScanState::Idle);
+
+        match result {
+            Ok(()) => {
+                self.revision += 1;
+                let _ = self.catalog.events.send(ManagerEvent::LibraryUpdated {
+                    library: library.to_string(),
+                    revision: self.revision,
+                });
+                was_dirty
+            }
+            Err(error) => {
+                tracing::warn!(%library, %error, "library scan failed");
+                let _ = self.catalog.events.send(ManagerEvent::LibraryScanFailed {
+                    library: library.to_string(),
+                    error,
+                });
+                false
+            }
+        }
+    }
+
+    /// Mark a library dirty. Returns `true` when a scan should be started now.
+    pub fn mark_dirty(&mut self, library: &str) -> bool {
+        match self.scan_state.get(library).copied() {
+            Some(ScanState::Scanning) => {
+                self.scan_state
+                    .insert(library.to_string(), ScanState::Dirty);
+                false
+            }
+            _ => {
+                self.scan_state
+                    .insert(library.to_string(), ScanState::Dirty);
+                true
+            }
+        }
+    }
+
+    // --- Query surface (delegates to the catalog) -------------------------
+
     pub async fn artists(&self) -> Result<Vec<Artist>, LibraryError> {
+        self.catalog.artists().await
+    }
+
+    pub async fn albums(&self) -> Result<Vec<Album>, LibraryError> {
+        self.catalog.albums().await
+    }
+
+    pub async fn tracks(&self) -> Result<Vec<Track>, LibraryError> {
+        self.catalog.tracks().await
+    }
+
+    pub async fn artist(&self, id: &ArtistId) -> Result<ArtistDetail, LibraryError> {
+        self.catalog.artist(id).await
+    }
+
+    pub async fn album(&self, id: &AlbumId) -> Result<AlbumDetail, LibraryError> {
+        self.catalog.album(id).await
+    }
+
+    pub async fn cover(&self, id: &CoverId, px: u32) -> Result<Bytes, LibraryError> {
+        self.catalog.cover(id, px).await
+    }
+
+    pub async fn track_bytes(&self, id: &TrackId) -> Result<Bytes, LibraryError> {
+        self.catalog.track_bytes(id).await
+    }
+
+    // --- Global database (playlists and history) --------------------------
+
+    pub async fn playlists(&self) -> Result<Vec<Playlist>, LibraryError> {
+        self.catalog.global.playlists().await
+    }
+
+    pub async fn create_playlist(&self, name: &str) -> Result<Playlist, LibraryError> {
+        self.catalog.global.create_playlist(name).await
+    }
+
+    pub async fn rename_playlist(&self, id: &str, name: &str) -> Result<(), LibraryError> {
+        self.catalog.global.rename_playlist(id, name).await
+    }
+
+    pub async fn delete_playlist(&self, id: &str) -> Result<(), LibraryError> {
+        self.catalog.global.delete_playlist(id).await
+    }
+
+    pub async fn playlist_tracks(
+        &self,
+        playlist_id: &str,
+    ) -> Result<Vec<PlaylistTrack>, LibraryError> {
+        self.catalog.global.playlist_tracks(playlist_id).await
+    }
+
+    pub async fn add_playlist_track(
+        &self,
+        playlist_id: &str,
+        track: &Track,
+    ) -> Result<(), LibraryError> {
+        self.catalog
+            .global
+            .add_playlist_track(playlist_id, track)
+            .await
+    }
+
+    pub async fn remove_playlist_track(
+        &self,
+        playlist_id: &str,
+        position: i64,
+    ) -> Result<(), LibraryError> {
+        self.catalog
+            .global
+            .remove_playlist_track(playlist_id, position)
+            .await
+    }
+
+    pub async fn move_playlist_track(
+        &self,
+        playlist_id: &str,
+        from: i64,
+        to: i64,
+    ) -> Result<(), LibraryError> {
+        self.catalog
+            .global
+            .move_playlist_track(playlist_id, from, to)
+            .await
+    }
+
+    pub async fn record_play(
+        &self,
+        track_id: &TrackId,
+        started_at: i64,
+        played_ms: Option<i64>,
+        completed: bool,
+    ) -> Result<(), LibraryError> {
+        self.catalog
+            .global
+            .record_play(track_id, started_at, played_ms, completed)
+            .await
+    }
+
+    pub async fn play_history(&self, limit: i64) -> Result<Vec<PlayHistoryEntry>, LibraryError> {
+        self.catalog.global.play_history(limit).await
+    }
+}
+
+impl ManagerHandle {
+    /// `(identifier, root)` for every opened library. Used for watcher
+    /// subscriptions, which only need the path.
+    pub fn watchers(&self) -> Vec<(String, std::path::PathBuf)> {
+        self.0
+            .libraries
+            .iter()
+            .map(|opened| {
+                let root = match &opened.config {
+                    LibraryConfig::Offline { root, .. } => root.clone(),
+                };
+                (opened.config.identifier().to_string(), root)
+            })
+            .collect()
+    }
+
+    pub async fn artists(&self) -> Result<Vec<Artist>, LibraryError> {
+        self.0.artists().await
+    }
+
+    pub async fn albums(&self) -> Result<Vec<Album>, LibraryError> {
+        self.0.albums().await
+    }
+
+    pub async fn tracks(&self) -> Result<Vec<Track>, LibraryError> {
+        self.0.tracks().await
+    }
+
+    pub async fn artist(&self, id: &ArtistId) -> Result<ArtistDetail, LibraryError> {
+        self.0.artist(id).await
+    }
+
+    pub async fn album(&self, id: &AlbumId) -> Result<AlbumDetail, LibraryError> {
+        self.0.album(id).await
+    }
+
+    pub async fn cover(&self, id: &CoverId, px: u32) -> Result<Bytes, LibraryError> {
+        self.0.cover(id, px).await
+    }
+
+    pub async fn track_bytes(&self, id: &TrackId) -> Result<Bytes, LibraryError> {
+        self.0.track_bytes(id).await
+    }
+}
+
+impl Catalog {
+    async fn artists(&self) -> Result<Vec<Artist>, LibraryError> {
         let mut artists = Vec::new();
         for opened in &self.libraries {
             let prefix = opened.config.identifier();
@@ -118,9 +431,7 @@ impl Manager {
         Ok(artists)
     }
 
-    /// Concatenates every library's albums, prefixes their ids and covers, and
-    /// sorts by album name (case-insensitive), then artist for ties.
-    pub async fn albums(&self) -> Result<Vec<Album>, LibraryError> {
+    async fn albums(&self) -> Result<Vec<Album>, LibraryError> {
         let mut albums = Vec::new();
         for opened in &self.libraries {
             let prefix = opened.config.identifier();
@@ -145,10 +456,7 @@ impl Manager {
         Ok(albums)
     }
 
-    /// Concatenates every library's tracks, prefixes their ids and covers, and
-    /// sorts by title (case-insensitive), then artist, album, track number, and
-    /// id for stable ties.
-    pub async fn tracks(&self) -> Result<Vec<Track>, LibraryError> {
+    async fn tracks(&self) -> Result<Vec<Track>, LibraryError> {
         let mut tracks = Vec::new();
         for opened in &self.libraries {
             let prefix = opened.config.identifier();
@@ -181,8 +489,8 @@ impl Manager {
         Ok(tracks)
     }
 
-    pub async fn artist(&self, id: &ArtistId) -> Result<ArtistDetail, LibraryError> {
-        let (opened, rest) = route(&self.libraries, id.as_str())?;
+    async fn artist(&self, id: &ArtistId) -> Result<ArtistDetail, LibraryError> {
+        let (opened, rest) = self.route(id.as_str())?;
         let mut detail = opened.library.artist(&ArtistId::new(rest)).await?;
         let prefix = opened.config.identifier();
         re_prefix_artist(prefix, &mut detail.artist);
@@ -192,8 +500,8 @@ impl Manager {
         Ok(detail)
     }
 
-    pub async fn album(&self, id: &AlbumId) -> Result<AlbumDetail, LibraryError> {
-        let (opened, rest) = route(&self.libraries, id.as_str())?;
+    async fn album(&self, id: &AlbumId) -> Result<AlbumDetail, LibraryError> {
+        let (opened, rest) = self.route(id.as_str())?;
         let mut detail = opened.library.album(&AlbumId::new(rest)).await?;
         let prefix = opened.config.identifier();
         re_prefix_album(prefix, &mut detail.album);
@@ -203,30 +511,64 @@ impl Manager {
         Ok(detail)
     }
 
-    pub async fn cover(&self, id: &CoverId, px: u32) -> Result<Bytes, LibraryError> {
-        let (opened, rest) = route(&self.libraries, id.as_str())?;
+    async fn cover(&self, id: &CoverId, px: u32) -> Result<Bytes, LibraryError> {
+        let (opened, rest) = self.route(id.as_str())?;
         opened.library.cover(&CoverId::new(rest), px).await
     }
 
-    pub async fn track_bytes(&self, id: &TrackId) -> Result<Bytes, LibraryError> {
-        let (opened, rest) = route(&self.libraries, id.as_str())?;
+    async fn track_bytes(&self, id: &TrackId) -> Result<Bytes, LibraryError> {
+        let (opened, rest) = self.route(id.as_str())?;
         opened.library.track_bytes(&TrackId::new(rest)).await
+    }
+
+    fn scan_plan(&self) -> Vec<ScanPlan> {
+        self.libraries
+            .iter()
+            .map(|opened| ScanPlan {
+                library: opened.config.identifier().to_string(),
+                config: opened.config.clone(),
+                handle: match &opened.library {
+                    Library::Offline(offline) => LibraryHandle::Offline(offline.handle()),
+                },
+            })
+            .collect()
+    }
+
+    fn route<'a>(&'a self, id: &str) -> Result<(&'a Opened, String), LibraryError> {
+        let Some((prefix, rest)) = id.split_once(':') else {
+            return Err(LibraryError::NotFound(format!(
+                "unprefixed library id: {id}"
+            )));
+        };
+        let opened = self
+            .libraries
+            .iter()
+            .find(|o| o.config.identifier() == prefix)
+            .ok_or_else(|| {
+                LibraryError::NotFound(format!("unknown library identifier: {prefix}"))
+            })?;
+        Ok((opened, rest.to_string()))
     }
 }
 
-/// Split at the first `:`, find the library whose identifier matches, strip
-/// the prefix. No provider is ever asked "is this yours?".
-fn route<'a>(libraries: &'a [Opened], id: &str) -> Result<(&'a Opened, String), LibraryError> {
-    let Some((prefix, rest)) = id.split_once(':') else {
-        return Err(LibraryError::NotFound(format!(
-            "unprefixed library id: {id}"
-        )));
-    };
-    let opened = libraries
-        .iter()
-        .find(|o| o.config.identifier() == prefix)
-        .ok_or_else(|| LibraryError::NotFound(format!("unknown library identifier: {prefix}")))?;
-    Ok((opened, rest.to_string()))
+impl LibraryHandle {
+    pub fn identifier(&self) -> &str {
+        match self {
+            Self::Offline(handle) => &handle.identifier,
+        }
+    }
+
+    pub fn root(&self) -> &Path {
+        match self {
+            Self::Offline(handle) => &handle.root,
+        }
+    }
+
+    pub fn pool(&self) -> &SqlitePool {
+        match self {
+            Self::Offline(handle) => &handle.pool,
+        }
+    }
 }
 
 fn re_prefix_artist(prefix: &str, artist: &mut Artist) {
@@ -247,255 +589,5 @@ fn re_prefix_track(prefix: &str, track: &mut Track) {
     track.id = TrackId::new(format!("{prefix}:{}", track.id.as_str()));
     if let Some(cover) = &track.cover {
         track.cover = Some(CoverId::new(format!("{prefix}:{}", cover.as_str())));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::{Path, PathBuf};
-
-    use super::*;
-    use crate::library::ScanMode;
-
-    fn fixture(name: &str) -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/music")
-            .join(name)
-    }
-
-    fn offline(
-        name: &str,
-        id: &str,
-        root: PathBuf,
-        enabled: bool,
-        scan: ScanMode,
-    ) -> LibraryConfig {
-        LibraryConfig::Offline {
-            name: name.into(),
-            id: id.into(),
-            root,
-            scan,
-            enabled,
-            never_split: Vec::new(),
-        }
-    }
-
-    fn open(configs: &[LibraryConfig]) -> Manager {
-        smol::block_on(Manager::open(configs)).expect("manager open")
-    }
-
-    #[test]
-    fn open_skips_disabled_entries() {
-        let configs = vec![
-            offline(
-                "Alpha",
-                "alpha",
-                fixture("folders"),
-                true,
-                ScanMode::Folders,
-            ),
-            // Points nowhere: opening it would fail the whole Manager::open.
-            offline(
-                "Ghost",
-                "ghost",
-                PathBuf::from("/definitely/missing/library"),
-                false,
-                ScanMode::Tags,
-            ),
-        ];
-        let manager = open(&configs);
-        let artists = smol::block_on(manager.artists()).expect("artists");
-        assert!(!artists.is_empty());
-        assert!(artists.iter().all(|a| a.id.as_str().starts_with("alpha:")));
-
-        let albums = smol::block_on(manager.albums()).expect("albums");
-        assert!(!albums.is_empty());
-        assert!(albums.iter().all(|a| a.id.as_str().starts_with("alpha:")));
-        assert!(albums.iter().all(|a| {
-            a.cover
-                .as_ref()
-                .is_none_or(|c| c.as_str().starts_with("alpha:"))
-        }));
-
-        let tracks = smol::block_on(manager.tracks()).expect("tracks");
-        assert!(!tracks.is_empty());
-        assert!(tracks.iter().all(|t| t.id.as_str().starts_with("alpha:")));
-        assert!(tracks.iter().all(|t| {
-            t.cover
-                .as_ref()
-                .is_none_or(|c| c.as_str().starts_with("alpha:"))
-        }));
-    }
-
-    #[test]
-    fn artists_merge_sorted_with_prefixed_ids() {
-        let configs = vec![
-            offline(
-                "Alpha",
-                "alpha",
-                fixture("manager-a"),
-                true,
-                ScanMode::Folders,
-            ),
-            offline(
-                "Beta",
-                "beta",
-                fixture("manager-b"),
-                true,
-                ScanMode::Folders,
-            ),
-        ];
-        let manager = open(&configs);
-        let artists = smol::block_on(manager.artists()).expect("artists");
-        assert_eq!(artists.len(), 2);
-        assert_eq!(artists[0].name, "Delta Artist");
-        assert_eq!(artists[0].id.as_str(), "beta:Delta Artist");
-        assert_eq!(artists[1].name, "Gamma Artist");
-        assert_eq!(artists[1].id.as_str(), "alpha:Gamma Artist");
-    }
-
-    #[test]
-    fn albums_and_tracks_merge_sorted_with_prefixed_ids() {
-        let configs = vec![
-            offline(
-                "Alpha",
-                "alpha",
-                fixture("manager-a"),
-                true,
-                ScanMode::Folders,
-            ),
-            offline(
-                "Beta",
-                "beta",
-                fixture("manager-b"),
-                true,
-                ScanMode::Folders,
-            ),
-        ];
-        let manager = open(&configs);
-
-        let albums = smol::block_on(manager.albums()).expect("albums");
-        assert_eq!(albums.len(), 2);
-        assert_eq!(albums[0].name, "Album");
-        assert_eq!(albums[0].id.as_str(), "beta:Delta Artist\u{0}Album");
-        assert_eq!(albums[1].name, "Gamma Album");
-        assert_eq!(albums[1].id.as_str(), "alpha:Gamma Artist\u{0}Gamma Album");
-        assert!(albums.iter().all(|album| album.song_count == 1));
-
-        let tracks = smol::block_on(manager.tracks()).expect("tracks");
-        assert_eq!(tracks.len(), 2);
-        assert_eq!(tracks[0].title, "One");
-        assert_eq!(
-            tracks[0].id.as_str(),
-            "alpha:Gamma Artist/Gamma Album/01 - One.mp3"
-        );
-        assert_eq!(tracks[1].title, "Two");
-        assert_eq!(
-            tracks[1].id.as_str(),
-            "beta:Delta Artist/Album/01 - Two.mp3"
-        );
-        assert_eq!(
-            tracks[0].cover.as_ref().map(|cover| cover.as_str()),
-            Some("alpha:Gamma Artist/Gamma Album")
-        );
-    }
-
-    #[test]
-    fn album_and_cover_route_by_identifier_and_reprefix() {
-        let configs = vec![offline(
-            "Alpha",
-            "alpha",
-            fixture("manager-a"),
-            true,
-            ScanMode::Folders,
-        )];
-        let manager = open(&configs);
-
-        let album_id = AlbumId::new("alpha:Gamma Artist\u{0}Gamma Album");
-        let detail = smol::block_on(manager.album(&album_id)).expect("album");
-        assert_eq!(
-            detail.album.id.as_str(),
-            "alpha:Gamma Artist\u{0}Gamma Album"
-        );
-        assert_eq!(
-            detail.songs[0].id.as_str(),
-            "alpha:Gamma Artist/Gamma Album/01 - One.mp3"
-        );
-        let cover = detail.songs[0]
-            .cover
-            .clone()
-            .expect("folder art on the track");
-        assert_eq!(cover.as_str(), "alpha:Gamma Artist/Gamma Album");
-        assert_eq!(detail.album.cover.as_ref(), Some(&cover));
-        let bytes = smol::block_on(manager.cover(&cover, 0)).expect("cover bytes");
-        assert!(!bytes.is_empty());
-
-        let artist_id = ArtistId::new("alpha:Gamma Artist");
-        let artist = smol::block_on(manager.artist(&artist_id)).expect("artist");
-        assert_eq!(artist.artist.id.as_str(), "alpha:Gamma Artist");
-        assert_eq!(
-            artist.albums[0].id.as_str(),
-            "alpha:Gamma Artist\u{0}Gamma Album"
-        );
-    }
-
-    #[test]
-    fn unprefixed_and_unknown_ids_are_not_found() {
-        let configs = vec![offline(
-            "Alpha",
-            "alpha",
-            fixture("manager-a"),
-            true,
-            ScanMode::Folders,
-        )];
-        let manager = open(&configs);
-
-        let unprefixed = AlbumId::new("Gamma Artist\u{0}Gamma Album");
-        let err = smol::block_on(manager.album(&unprefixed)).expect_err("unprefixed");
-        assert!(matches!(err, LibraryError::NotFound(_)));
-
-        let unknown = AlbumId::new("zzz:whatever");
-        let err = smol::block_on(manager.album(&unknown)).expect_err("unknown prefix");
-        assert!(matches!(err, LibraryError::NotFound(_)));
-    }
-
-    #[test]
-    fn duplicate_and_malformed_identifiers_reject_open() {
-        let duplicate = vec![
-            offline("A", "same", fixture("manager-a"), true, ScanMode::Folders),
-            // Validation covers every entry, enabled or not.
-            offline("B", "same", fixture("manager-b"), false, ScanMode::Tags),
-        ];
-        let err = smol::block_on(Manager::open(&duplicate)).expect_err("duplicate id");
-        assert!(matches!(err, LibraryError::Invalid(_)));
-
-        let malformed = vec![offline(
-            "A",
-            "Bad Id",
-            fixture("manager-a"),
-            true,
-            ScanMode::Folders,
-        )];
-        let err = smol::block_on(Manager::open(&malformed)).expect_err("malformed id");
-        assert!(matches!(err, LibraryError::Invalid(_)));
-    }
-
-    #[test]
-    fn open_failure_names_the_offending_library() {
-        let configs = vec![offline(
-            "Broken",
-            "broken",
-            PathBuf::from("/definitely/missing/library"),
-            true,
-            ScanMode::Tags,
-        )];
-        let err = smol::block_on(Manager::open(&configs)).expect_err("missing root");
-        match err {
-            LibraryError::Invalid(msg) => {
-                assert!(msg.contains("Broken"));
-                assert!(msg.contains("broken"));
-            }
-            other => panic!("expected Invalid naming the library, got {other:?}"),
-        }
     }
 }

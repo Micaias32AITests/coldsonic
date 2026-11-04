@@ -3,7 +3,7 @@
 //! A thin coordinator over two child screens — [`list_libraries`] (home)
 //! and [`add_offline`] — plus the `Opening` in-flight state. The shell
 //! loads `libraries.toml` once, routes events between the children, runs
-//! `Manager::open` on "Open", and emits `Arc<Manager>` upward, after which
+//! `Manager::open` on "Open", and emits `Manager` upward, after which
 //! the coordinator swaps to the main screen. (Auto-open on boot is future
 //! work.) Facet 3 adds a subsonic login mode next to `AddOffline` without
 //! touching this shell.
@@ -30,7 +30,7 @@ enum Mode {
     Opening(Vec<LibraryConfig>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Msg {
     ListLibraries(list_libraries::Msg),
     AddOffline(add_offline::Msg),
@@ -40,15 +40,14 @@ pub enum Msg {
     ShowList(Vec<LibraryConfig>),
     /// Internal: the list asked to open the app.
     StartOpening(Vec<LibraryConfig>),
-    OpenFinished(Result<Arc<Manager>, String>),
+    OpenFinished(Result<Manager, String>),
 }
 
-fn open_task(libraries: Vec<LibraryConfig>) -> Action<Msg, Arc<Manager>> {
+fn open_task(libraries: Vec<LibraryConfig>) -> Action<Msg, Manager> {
     Action::task(Task::perform(
         async move {
             Manager::open(&libraries)
                 .await
-                .map(Arc::new)
                 .map_err(|err| err.to_string())
         },
         Msg::OpenFinished,
@@ -70,7 +69,7 @@ impl State {
         )
     }
 
-    pub fn update(&mut self, msg: Msg) -> Action<Msg, Arc<Manager>> {
+    pub fn update(&mut self, msg: Msg) -> Action<Msg, Manager> {
         match msg {
             Msg::ListLibraries(inner) => {
                 let Mode::ListLibraries(screen) = &mut self.mode else {

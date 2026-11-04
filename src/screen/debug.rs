@@ -1,8 +1,8 @@
 use std::time::Duration;
 
+use iced::futures::Stream;
 use iced::stream;
 use iced::{Element, Task};
-use smol::stream::Stream;
 
 use crate::Action;
 use crate::prelude::*;
@@ -54,7 +54,7 @@ fn list_grower() -> impl Stream<Item = Msg> {
         100,
         |mut out: iced::futures::channel::mpsc::Sender<Msg>| async move {
             for val in (1..).step_by(50) {
-                smol::Timer::after(Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
                 let vec = (val..val + 50).map(|v| format!("{v} item")).collect();
                 let _ = out.try_send(Msg::AddNewValues(vec));
             }

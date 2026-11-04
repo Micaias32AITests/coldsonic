@@ -6,7 +6,6 @@ use iced::{Element, Subscription, Task, Theme, application};
 use coldsonic::library::Manager;
 use coldsonic::screen;
 use coldsonic::screen::library_setup;
-use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -32,7 +31,7 @@ pub enum State {
     Main(Box<screen::MainScreen>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Msg {
     #[cfg(feature = "dev")]
     ScreenDebug(screen::debug::Msg),
@@ -42,7 +41,7 @@ pub enum Msg {
     ScreenSetup(library_setup::Msg),
     // clipppy being a bitch again
     ScreenMain(Box<screen::Msg>),
-    LibraryReady(Arc<Manager>),
+    LibraryReady(Manager),
     FontLoaded(Result<(), iced::font::Error>),
 }
 
@@ -141,9 +140,20 @@ impl State {
                 Self::Debug(screen) => screen.view().map(Msg::ScreenDebug),
             },
             #[cfg(feature = "dev")]
-            iced::widget::row![iced::widget::button("Debug Screen").on_press(Msg::GoToDebug)]
-                .align_y(Center)
-                .into(),
+            {
+                // The button widget requires its own message type to be
+                // `Clone`; main's `Msg` is not (it carries `Manager`).
+                #[derive(Clone)]
+                enum DevMsg {
+                    GoToDebug,
+                }
+
+                let debug_button: Element<'_, Msg> =
+                    Element::from(iced::widget::button("Debug Screen").on_press(DevMsg::GoToDebug))
+                        .map(|DevMsg::GoToDebug| Msg::GoToDebug);
+
+                iced::widget::row![debug_button].align_y(Center).into()
+            },
         ])
         .height(Fill)
         .into()

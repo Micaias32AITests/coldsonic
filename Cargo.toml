@@ -5,21 +5,25 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
-async-compat = "0.2.6"
 bytes = "1.9"
 directories = "6.0"
-iced = { version = "0.14.0", features = ["smol", "image", "advanced"] }
+futures = "0.3"
+iced = { version = "0.14.0", features = ["tokio", "image", "advanced"] }
 iced_fonts = { version = "0.3", features = ["lucide"] }
+iced_futures = "0.14"
 itertools = "0.15.0"
 lofty = "0.25"
+notify = "8"
+notify-debouncer-full = "0.5"
 opensubsonic = "0.6.1"
 rand = "0.9"
 rodio = "0.23"
 reqwest = "0.13.5"
 rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
-smol = "2.0.2"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 thiserror = "2.0.20"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs", "sync"] }
 toml = "1.1.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -27,3 +31,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [features]
 default = []
 dev = ["iced/debug"]
+
+[dev-dependencies]
+tempfile = "3"

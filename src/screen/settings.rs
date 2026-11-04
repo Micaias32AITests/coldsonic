@@ -14,6 +14,7 @@ pub enum Msg {
     PanelStartupSelected(PanelStartup),
     PanelScreenSelected(PanelScreenConfig),
     SetPanelOpen(bool),
+    RescanLibraries,
 }
 
 #[derive(Debug, Clone)]
@@ -21,6 +22,7 @@ pub enum Event {
     SetPanelStartup(PanelStartup),
     SetPanelScreen(PanelScreenConfig),
     SetPanelOpen(bool),
+    RescanLibraries,
 }
 
 pub fn init() -> State {
@@ -32,6 +34,7 @@ pub fn update(_state: &mut State, msg: Msg) -> Action<Msg, Event> {
         Msg::PanelStartupSelected(value) => Event::SetPanelStartup(value),
         Msg::PanelScreenSelected(value) => Event::SetPanelScreen(value),
         Msg::SetPanelOpen(open) => Event::SetPanelOpen(open),
+        Msg::RescanLibraries => Event::RescanLibraries,
     };
     Action::emit(event)
 }
@@ -76,11 +79,8 @@ pub fn view<'a>(_state: &'a State, settings: &'a UiSettings, panel_open: bool) -
         ),
         section("Libraries"),
         setting_row(
-            "Manage libraries",
-            text("Coming soon")
-                .size(12)
-                .color([0.55, 0.55, 0.55])
-                .into(),
+            "Rescan libraries",
+            button("Rescan now").on_press(Msg::RescanLibraries).into(),
         ),
         text("Settings are saved automatically.")
             .size(11)

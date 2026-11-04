@@ -69,7 +69,9 @@ pub mod debug;
 
 use crate::config::{self, PanelScreenConfig, PanelStartup, UiSettings};
 use crate::engine::{self, Engine, EngineEvent, EngineMsg};
-use crate::library::{AlbumId, ArtistId, CoverId, Manager};
+use crate::library::{
+    AlbumId, ArtistId, CoverId, Manager, ManagerEvent, ManagerHandle, ScanOutcome,
+};
 use crate::prelude::*;
 use crate::widget::stack::{StackEntry, stack};
 
@@ -78,11 +80,14 @@ pub mod albums;
 pub mod all_tracks;
 pub mod artist_detail;
 pub mod artists;
+pub mod covers;
 pub mod library_setup;
+pub mod load_state;
 pub mod now_playing_panel;
 pub mod queue;
 pub mod settings;
 pub mod sidebar;
+pub mod watcher;
 
 /// Read-only shared state passed to a child screen for one call.
 ///
@@ -90,7 +95,7 @@ pub mod sidebar;
 /// never stored in a screen, and it contains only references or `Copy` data.
 #[derive(Clone, Copy)]
 pub struct Ctx<'a> {
-    pub manager: &'a Arc<Manager>,
+    pub manager: &'a Manager,
     pub engine: &'a Engine,
     pub now_playing: Option<&'a engine::NowPlaying>,
 }
@@ -148,7 +153,7 @@ pub struct ScreenEntry {
 
 #[derive(Debug)]
 pub struct MainScreen {
-    manager: Arc<Manager>,
+    manager: Manager,
     engine: Engine,
     /// Snapshot pushed by the engine; the bar renders from this.
     now_playing: Option<engine::NowPlaying>,
@@ -299,6 +304,12 @@ pub enum Msg {
     Engine(engine::EngineMsg),
     /// Engine events (from `Engine::update`) applied to the UI state.
     EngineEvent(engine::EngineEvent),
+    /// A library changed on disk (debounced watcher).
+    LibraryChanged(String),
+    /// A scan task finished; the database is already committed.
+    LibraryScanFinished(ScanOutcome),
+    /// Manager events (library updates and failures).
+    Manager(ManagerEvent),
     /// Produced by the 250 ms subscription; drives `engine.tick()`.
     Tick,
     /// Cover fetch result for a cover id (mirrors `artists::Msg::CoverLoaded`).
@@ -321,7 +332,7 @@ pub enum Msg {
 }
 
 impl MainScreen {
-    pub fn init(manager: Arc<Manager>) -> (Self, Task<Msg>) {
+    pub fn init(manager: Manager) -> (Self, Task<Msg>) {
         let ui_settings = config::load_ui_settings();
         let panel_open = match ui_settings.panel_startup {
             PanelStartup::PersistState => ui_settings.panel_open,
@@ -330,8 +341,10 @@ impl MainScreen {
         };
         let panel_screen = PanelScreen::from(ui_settings.panel_screen.clone());
         let panes = Panes::build(&ui_settings, panel_open);
+        let revision = manager.revision();
+        let handle = manager.handle();
 
-        let (artists_state, task) = artists::init(manager.clone());
+        let (artists_state, task) = artists::init(handle.clone(), revision);
 
         let entries = vec![StackEntry::new(
             0,
@@ -341,25 +354,27 @@ impl MainScreen {
             },
         )];
 
+        let mut screen = Self {
+            engine: Engine::real(handle),
+            manager,
+            now_playing: None,
+            cover: None,
+            seeking: None,
+            last_volume: 1.0,
+            entries,
+            next_route_id: 1,
+            panes,
+            ui_settings,
+            settings_dirty: false,
+            panel_open,
+            panel_screen,
+            queue_screen: queue::init(),
+            now_playing_screen: now_playing_panel::init(),
+        };
+        let startup = screen.start_scan_all(false);
         (
-            Self {
-                engine: Engine::real(manager.clone()),
-                manager,
-                now_playing: None,
-                cover: None,
-                seeking: None,
-                last_volume: 1.0,
-                entries,
-                next_route_id: 1,
-                panes,
-                ui_settings,
-                settings_dirty: false,
-                panel_open,
-                panel_screen,
-                queue_screen: queue::init(),
-                now_playing_screen: now_playing_panel::init(),
-            },
-            task.map(Msg::ArtistsScreenMsg),
+            screen,
+            Task::batch([task.map(Msg::ArtistsScreenMsg), startup]),
         )
     }
 
@@ -368,11 +383,7 @@ impl MainScreen {
             Msg::ArtistsScreenMsg(inner) => {
                 let action = {
                     let MainScreen {
-                        entries,
-                        manager,
-                        engine,
-                        now_playing,
-                        ..
+                        entries, manager, ..
                     } = self;
 
                     let Some(entry) = entries.last_mut() else {
@@ -382,13 +393,7 @@ impl MainScreen {
                         return Task::none();
                     };
 
-                    let ctx = Ctx {
-                        manager: &*manager,
-                        engine: &*engine,
-                        now_playing: now_playing.as_ref(),
-                    };
-
-                    artists::update(screen, ctx, inner)
+                    artists::update(screen, &*manager, inner)
                 };
 
                 match action {
@@ -562,6 +567,23 @@ impl MainScreen {
                     .handle(Msg::Engine, |event| Task::done(Msg::EngineEvent(event)))
             }
             Msg::EngineEvent(event) => self.apply_engine_event(event),
+            Msg::LibraryChanged(library) => {
+                if self.manager.mark_dirty(&library) {
+                    self.start_scan(&library, false)
+                } else {
+                    Task::none()
+                }
+            }
+            Msg::LibraryScanFinished(outcome) => {
+                let ScanOutcome { library, result } = outcome;
+                let follow_up = self.manager.finish_scan(&library, result);
+                if follow_up {
+                    self.start_scan(&library, false)
+                } else {
+                    Task::none()
+                }
+            }
+            Msg::Manager(event) => self.handle_manager_event(event),
             Msg::Tick => {
                 let (events, engine_task) = self.engine.tick();
                 let mut tasks: Vec<Task<Msg>> = events
@@ -648,6 +670,7 @@ impl MainScreen {
                 // The root entry is never popped: back from a root is a no-op.
                 if self.entries.len() > 1 {
                     self.entries.pop();
+                    return self.reload_top();
                 }
                 Task::none()
             }
@@ -659,6 +682,7 @@ impl MainScreen {
                     && key == iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowLeft);
                 if back && self.entries.len() > 1 {
                     self.entries.pop();
+                    return self.reload_top();
                 }
                 Task::none()
             }
@@ -715,12 +739,13 @@ impl MainScreen {
                 self.set_panel_screen(PanelScreen::from(value))
             }
             settings::Event::SetPanelOpen(open) => self.set_panel_open(open),
+            settings::Event::RescanLibraries => self.start_scan_all(true),
         }
     }
 
     fn play_shuffled(&self, id: ArtistId) -> Task<Msg> {
-        let manager = self.manager.clone();
-        Task::perform(collect_shuffled_songs(manager, id), |res| match res {
+        let handle = self.manager.handle();
+        Task::perform(collect_shuffled_songs(handle, id), |res| match res {
             Ok(tracks) => Msg::Engine(EngineMsg::PlayQueue(tracks)),
             Err(err) => Msg::EngineEvent(EngineEvent::Error(err.to_string())),
         })
@@ -746,10 +771,18 @@ impl MainScreen {
     }
 
     pub fn subscription(&self) -> Subscription<Msg> {
-        Subscription::batch([
+        let handle = self.manager.handle();
+        let mut subscriptions: Vec<Subscription<Msg>> = vec![
             Subscription::run(tick_stream),
             iced::keyboard::listen().map(Msg::Keyboard),
-        ])
+            watcher::manager_events(self.manager.subscribe()).map(Msg::Manager),
+        ];
+        subscriptions.extend(
+            watcher::watchers(&handle)
+                .into_iter()
+                .map(|subscription| subscription.map(Msg::LibraryChanged)),
+        );
+        Subscription::batch(subscriptions)
     }
 }
 
@@ -806,6 +839,97 @@ impl MainScreen {
         self.panes.panel_split
     }
 
+    fn start_scan_all(&mut self, force: bool) -> Task<Msg> {
+        let plans = self.manager.scan_plan();
+        let mut tasks = Vec::new();
+        for plan in plans {
+            if self.manager.begin_scan(&plan.library) {
+                tasks.push(Task::perform(
+                    crate::library::scan::library(plan, force),
+                    Msg::LibraryScanFinished,
+                ));
+            }
+        }
+        Task::batch(tasks)
+    }
+
+    fn start_scan(&mut self, library: &str, force: bool) -> Task<Msg> {
+        let plan = self
+            .manager
+            .scan_plan()
+            .into_iter()
+            .find(|plan| plan.library == library);
+        let Some(plan) = plan else {
+            return Task::none();
+        };
+        if !self.manager.begin_scan(library) {
+            return Task::none();
+        }
+        Task::perform(
+            crate::library::scan::library(plan, force),
+            Msg::LibraryScanFinished,
+        )
+    }
+
+    fn handle_manager_event(&mut self, event: ManagerEvent) -> Task<Msg> {
+        match event {
+            ManagerEvent::LibraryUpdated { revision, .. } => self.on_library_updated(revision),
+            ManagerEvent::Lagged => {
+                let revision = self.manager.revision();
+                self.on_library_updated(revision)
+            }
+            ManagerEvent::LibraryScanFailed { library, error } => {
+                warn!(%library, %error, "library scan failed");
+                Task::none()
+            }
+            ManagerEvent::LibraryScanStarted { .. } => Task::none(),
+        }
+    }
+
+    fn on_library_updated(&mut self, revision: u64) -> Task<Msg> {
+        for entry in &mut self.entries {
+            entry.value.screen.mark_dirty(revision);
+        }
+        self.reload_top()
+    }
+
+    /// Reload the top entry if it was marked dirty by a library event.
+    fn reload_top(&mut self) -> Task<Msg> {
+        let MainScreen {
+            entries, manager, ..
+        } = self;
+        let Some(entry) = entries.last_mut() else {
+            return Task::none();
+        };
+        if !entry.value.screen.is_dirty() {
+            return Task::none();
+        }
+        let manager = &*manager;
+        match &mut entry.value.screen {
+            SubScreen::Artists(screen) => action_to_task(
+                artists::update(screen, manager, artists::Msg::Reload),
+                Msg::ArtistsScreenMsg,
+            ),
+            SubScreen::ArtistDetail(screen) => action_to_task(
+                artist_detail::update(screen, manager, artist_detail::Msg::Reload),
+                Msg::ArtistDetailMsg,
+            ),
+            SubScreen::AlbumDetail(screen) => action_to_task(
+                album_detail::update(screen, manager, album_detail::Msg::Reload),
+                Msg::AlbumDetailMsg,
+            ),
+            SubScreen::Albums(screen) => action_to_task(
+                albums::update(screen, manager, albums::Msg::Reload),
+                Msg::AlbumsScreenMsg,
+            ),
+            SubScreen::AllTracks(screen) => action_to_task(
+                all_tracks::update(screen, manager, all_tracks::Msg::Reload),
+                Msg::AllTracksScreenMsg,
+            ),
+            SubScreen::Playlists | SubScreen::Settings(_) => Task::none(),
+        }
+    }
+
     fn set_panel_open(&mut self, open: bool) -> Task<Msg> {
         if self.panel_open == open {
             return Task::none();
@@ -854,28 +978,30 @@ impl MainScreen {
     }
 
     fn make_screen(&self, route: &Route) -> (SubScreen, Task<Msg>) {
+        let handle = self.manager.handle();
+        let revision = self.manager.revision();
         match route {
             Route::Artists => {
-                let (state, task) = artists::init(self.manager.clone());
+                let (state, task) = artists::init(handle, revision);
                 (SubScreen::Artists(state), task.map(Msg::ArtistsScreenMsg))
             }
             Route::ArtistDetail(id) => {
-                let (state, task) = artist_detail::init(id.clone(), self.manager.clone());
+                let (state, task) = artist_detail::init(id.clone(), handle, revision);
                 (
                     SubScreen::ArtistDetail(state),
                     task.map(Msg::ArtistDetailMsg),
                 )
             }
             Route::AlbumDetail(id) => {
-                let (state, task) = album_detail::init(id.clone(), self.manager.clone());
+                let (state, task) = album_detail::init(id.clone(), handle, revision);
                 (SubScreen::AlbumDetail(state), task.map(Msg::AlbumDetailMsg))
             }
             Route::Albums => {
-                let (state, task) = albums::init(self.manager.clone());
+                let (state, task) = albums::init(handle, revision);
                 (SubScreen::Albums(state), task.map(Msg::AlbumsScreenMsg))
             }
             Route::AllTracks => {
-                let (state, task) = all_tracks::init(self.manager.clone());
+                let (state, task) = all_tracks::init(handle, revision);
                 (
                     SubScreen::AllTracks(state),
                     task.map(Msg::AllTracksScreenMsg),
@@ -905,7 +1031,7 @@ impl MainScreen {
 
         if is_root {
             self.entries.truncate(1);
-            return Task::none();
+            return self.reload_top();
         }
 
         self.entries.clear();
@@ -1129,10 +1255,10 @@ impl MainScreen {
                 self.cover = None;
                 self.seeking = None;
                 task = if let Some(cover) = track.cover.clone() {
-                    let manager = self.manager.clone();
+                    let handle = self.manager.handle();
                     let fetch_cover = cover.clone();
                     Task::perform(
-                        async move { manager.cover(&fetch_cover, COVER_PX).await },
+                        async move { handle.cover(&fetch_cover, COVER_PX).await },
                         move |res| Msg::CoverLoaded(cover, res.map_err(|_| ())),
                     )
                 } else {
@@ -1164,6 +1290,43 @@ fn placeholder(title: impl Into<String>) -> Element<'static, Msg> {
         .width(Fill)
         .height(Fill)
         .into()
+}
+
+impl SubScreen {
+    /// Mark the screen stale after a library update. Covers are cleared so the
+    /// next reload refetches only the ids still referenced.
+    fn mark_dirty(&mut self, revision: u64) {
+        match self {
+            SubScreen::Artists(screen) => screen.mark_dirty(revision),
+            SubScreen::ArtistDetail(screen) => screen.mark_dirty(revision),
+            SubScreen::AlbumDetail(screen) => screen.mark_dirty(revision),
+            SubScreen::Albums(screen) => screen.mark_dirty(revision),
+            SubScreen::AllTracks(screen) => screen.mark_dirty(revision),
+            SubScreen::Playlists | SubScreen::Settings(_) => {}
+        }
+    }
+
+    fn is_dirty(&self) -> bool {
+        match self {
+            SubScreen::Artists(screen) => screen.is_dirty(),
+            SubScreen::ArtistDetail(screen) => screen.is_dirty(),
+            SubScreen::AlbumDetail(screen) => screen.is_dirty(),
+            SubScreen::Albums(screen) => screen.is_dirty(),
+            SubScreen::AllTracks(screen) => screen.is_dirty(),
+            SubScreen::Playlists | SubScreen::Settings(_) => false,
+        }
+    }
+}
+
+fn action_to_task<M, E>(action: Action<M, E>, map: impl Fn(M) -> Msg + Send + 'static) -> Task<Msg>
+where
+    M: Send + 'static,
+{
+    match action {
+        Action::None => Task::none(),
+        Action::Task(task) => task.map(map),
+        Action::Emit(_) => Task::none(),
+    }
 }
 
 fn panel_tab_style(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
@@ -1200,7 +1363,7 @@ fn tick_stream() -> impl Stream<Item = Msg> {
         1,
         |mut output: iced::futures::channel::mpsc::Sender<Msg>| async move {
             loop {
-                smol::Timer::after(TICK).await;
+                tokio::time::sleep(TICK).await;
                 if output.send(Msg::Tick).await.is_err() {
                     break; // the app has shut down
                 }
@@ -1215,13 +1378,13 @@ fn tick_stream() -> impl Stream<Item = Msg> {
 /// [`crate::library::ArtistDetail`] already lists albums — no `is_dir` filter
 /// (splits live inside a single library, not across id hierarchies).
 async fn collect_shuffled_songs(
-    manager: Arc<Manager>,
+    handle: ManagerHandle,
     artist_id: ArtistId,
 ) -> Result<Vec<engine::Track>, engine::EngineError> {
-    let detail = manager.artist(&artist_id).await?;
+    let detail = handle.artist(&artist_id).await?;
     let mut songs = Vec::new();
     for album in detail.albums {
-        songs.extend(manager.album(&album.id).await?.songs);
+        songs.extend(handle.album(&album.id).await?.songs);
     }
     fisher_yates(&mut songs, &mut rand::rng()); // sure bro
     Ok(songs)

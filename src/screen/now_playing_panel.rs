@@ -76,10 +76,10 @@ fn refresh(state: &mut State, ctx: Ctx<'_>) -> Action<Msg, Event> {
         return Action::none();
     };
 
-    let manager = Arc::clone(ctx.manager);
+    let handle = ctx.manager.handle();
     let fetch = id.clone();
     Action::task(Task::perform(
-        async move { manager.cover(&fetch, COVER_PX).await },
+        async move { handle.cover(&fetch, COVER_PX).await },
         move |res| Msg::CoverLoaded(id, res.map_err(|_| ())),
     ))
 }

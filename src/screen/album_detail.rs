@@ -1,17 +1,15 @@
 //! Album detail: the selected album's header and tracks.
-//!
-//! Playback is an intent emitted to `MainScreen`; the screen owns only local
-//! display state and cover handles.
 
 use std::time::Duration;
 
 use bytes::Bytes;
 use iced_fonts::lucide;
 
-use crate::library::{Album, AlbumDetail, AlbumId, CoverId, Manager, Track};
+use crate::library::{AlbumDetail, AlbumId, CoverId, Manager, ManagerHandle, Track};
 use crate::prelude::*;
 
 use super::fmt_duration;
+use super::load_state::{LoadError, LoadState};
 
 /// Pixel size requested for the header cover (2x the 128 px display).
 const HEADER_COVER_PX: u32 = 256;
@@ -20,11 +18,10 @@ const HEADER_COVER_DISPLAY: f32 = 128.0;
 #[derive(Debug)]
 pub struct State {
     id: AlbumId,
-    album: Option<Album>,
-    songs: Vec<Track>,
-    loaded: bool,
-    error: Option<String>,
+    load: LoadState<AlbumDetail>,
     cover: CoverState,
+    revision: u64,
+    dirty: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -37,7 +34,12 @@ enum CoverState {
 
 #[derive(Debug, Clone)]
 pub enum Msg {
-    Loaded(AlbumId, Result<AlbumDetail, String>),
+    Loaded {
+        revision: u64,
+        id: AlbumId,
+        result: Result<AlbumDetail, LoadError>,
+    },
+    Reload,
     CoverLoaded(CoverId, Result<Bytes, ()>),
     PlayAll,
     PlayTrack(Track),
@@ -49,116 +51,126 @@ pub enum Event {
     PlayTrack(Track),
 }
 
-pub fn init(id: AlbumId, manager: Arc<Manager>) -> (State, Task<Msg>) {
-    let fetch_id = id.clone();
-    let message_id = id.clone();
-    let task = Task::perform(
-        async move {
-            manager
-                .album(&fetch_id)
-                .await
-                .map_err(|err| err.to_string())
-        },
-        move |result| Msg::Loaded(message_id, result),
-    );
-
+pub fn init(id: AlbumId, handle: ManagerHandle, revision: u64) -> (State, Task<Msg>) {
+    let task = fetch(id.clone(), handle, revision);
     (
         State {
             id,
-            album: None,
-            songs: Vec::new(),
-            loaded: false,
-            error: None,
+            load: LoadState::Loading,
             cover: CoverState::NotLoaded,
+            revision,
+            dirty: false,
         },
         task,
     )
 }
 
-pub fn update(state: &mut State, manager: &Arc<Manager>, msg: Msg) -> Action<Msg, Event> {
+fn fetch(id: AlbumId, handle: ManagerHandle, revision: u64) -> Task<Msg> {
+    let message_id = id.clone();
+    Task::perform(async move { handle.album(&id).await }, move |result| {
+        Msg::Loaded {
+            revision,
+            id: message_id,
+            result: result.map_err(LoadError::from),
+        }
+    })
+}
+
+pub fn update(state: &mut State, manager: &Manager, msg: Msg) -> Action<Msg, Event> {
     match msg {
-        Msg::Loaded(id, result) => {
-            if state.id != id {
+        Msg::Reload => {
+            state.dirty = true;
+            Action::task(fetch(state.id.clone(), manager.handle(), state.revision))
+        }
+        Msg::Loaded {
+            revision,
+            id,
+            result,
+        } => {
+            if revision != state.revision || state.id != id {
                 return Action::none();
             }
-
-            state.loaded = true;
-            match result {
-                Ok(detail) => {
+            state.dirty = false;
+            state.load = super::load_state::load_state(result);
+            match &state.load {
+                LoadState::Loaded(detail) => {
                     let cover = detail.album.cover.clone();
-                    state.album = Some(detail.album);
-                    state.songs = detail.songs;
-                    state.error = None;
-
                     let Some(cover) = cover else {
                         state.cover = CoverState::NotLoaded;
                         return Action::none();
                     };
-
                     state.cover = CoverState::Loading;
-                    Action::task(cover_task(manager, cover))
+                    Action::task(cover_task(manager.handle(), cover))
                 }
-                Err(error) => {
-                    state.album = None;
-                    state.songs.clear();
+                _ => {
                     state.cover = CoverState::NotLoaded;
-                    state.error = Some(error);
                     Action::none()
                 }
             }
         }
         Msg::CoverLoaded(id, result) => {
-            if state.album.as_ref().and_then(|album| album.cover.as_ref()) == Some(&id) {
+            if state
+                .load
+                .loaded()
+                .and_then(|detail| detail.album.cover.as_ref())
+                == Some(&id)
+            {
                 state.cover = cover_from_result(result);
             }
             Action::none()
         }
-        Msg::PlayAll => {
-            if state.songs.is_empty() {
-                Action::none()
-            } else {
-                Action::emit(Event::PlayQueue(state.songs.clone()))
+        Msg::PlayAll => match state.load.loaded() {
+            Some(detail) if !detail.songs.is_empty() => {
+                Action::emit(Event::PlayQueue(detail.songs.clone()))
             }
-        }
+            _ => Action::none(),
+        },
         Msg::PlayTrack(track) => Action::emit(Event::PlayTrack(track)),
     }
 }
 
+impl State {
+    pub fn mark_dirty(&mut self, revision: u64) {
+        self.revision = revision;
+        self.dirty = true;
+        self.cover = CoverState::NotLoaded;
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+}
+
 pub fn view(state: &State) -> Element<'_, Msg> {
-    if !state.loaded {
-        return centered_muted("loading...");
-    }
-
-    if let Some(error) = &state.error {
-        return centered_muted(error.clone());
-    }
-
-    let Some(album) = &state.album else {
-        return centered_muted("Album not found");
+    let detail = match &state.load {
+        LoadState::Loading => return centered_muted("loading..."),
+        LoadState::NotFound => return centered_muted("Album not found"),
+        LoadState::Error(error) => return centered_muted(error.clone()),
+        LoadState::Loaded(detail) => detail,
     };
 
-    let total = state
+    let total = detail
         .songs
         .iter()
         .fold(Duration::ZERO, |total, track| total + track.duration);
-    let artist = album.artist.as_deref().unwrap_or("");
+    let artist = detail.album.artist.as_deref().unwrap_or("");
     let mut parts = Vec::new();
     if !artist.is_empty() {
         parts.push(artist.to_string());
     }
-    parts.push(format!("{} songs", state.songs.len()));
+    parts.push(format!("{} songs", detail.songs.len()));
     parts.push(fmt_duration(total));
     let metadata = parts.join(" · ");
 
     let header = widget::row![
         cover_view(&state.cover, HEADER_COVER_DISPLAY),
         widget::column![
-            text(&album.name).size(24),
+            text(&detail.album.name).size(24),
             text(metadata).size(12).color([0.6, 0.6, 0.6]),
         ]
         .spacing(4),
         widget::space::horizontal(),
-        button("Play album").on_press_maybe((!state.songs.is_empty()).then_some(Msg::PlayAll)),
+        button("Play album").on_press_maybe((!detail.songs.is_empty()).then_some(Msg::PlayAll)),
     ]
     .align_y(Center)
     .spacing(16)
@@ -167,7 +179,7 @@ pub fn view(state: &State) -> Element<'_, Msg> {
         ..Padding::default()
     });
 
-    let body: Element<'_, Msg> = if state.songs.is_empty() {
+    let body: Element<'_, Msg> = if detail.songs.is_empty() {
         centered_muted("No songs")
     } else {
         let list = table(
@@ -198,7 +210,7 @@ pub fn view(state: &State) -> Element<'_, Msg> {
                     )
                 }),
             ],
-            state.songs.clone(),
+            detail.songs.clone(),
         )
         .width(Fill);
 
@@ -211,11 +223,10 @@ pub fn view(state: &State) -> Element<'_, Msg> {
         .into()
 }
 
-fn cover_task(manager: &Arc<Manager>, id: CoverId) -> Task<Msg> {
-    let manager = Arc::clone(manager);
+fn cover_task(handle: ManagerHandle, id: CoverId) -> Task<Msg> {
     let returned_id = id.clone();
     Task::perform(
-        async move { manager.cover(&id, HEADER_COVER_PX).await },
+        async move { handle.cover(&id, HEADER_COVER_PX).await },
         move |result| Msg::CoverLoaded(returned_id, result.map_err(|_| ())),
     )
 }

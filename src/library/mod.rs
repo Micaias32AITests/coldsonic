@@ -9,8 +9,10 @@
 //! manager prefixes with the library's identifier (`{identifier}:`) so routing
 //! a query back down is pure string work with no guessing.
 
+pub mod db;
 pub mod manager;
 pub mod offline;
+pub mod scan;
 
 use std::collections::HashSet;
 use std::fmt;
@@ -20,7 +22,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-pub use manager::Manager;
+pub use manager::{LibraryHandle, Manager, ManagerEvent, ManagerHandle, ScanOutcome, ScanPlan};
 
 macro_rules! id_newtype {
     ($(#[$meta:meta])* $name:ident) => {
@@ -113,10 +115,46 @@ pub struct AlbumDetail {
 pub enum LibraryError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("database error: {0}")]
+    Db(#[from] sqlx::Error),
     #[error("{0}")]
     NotFound(String),
     #[error("{0}")]
     Invalid(String),
+}
+
+/// A user playlist from the global database.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Playlist {
+    pub id: String,
+    pub name: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// One snapshot entry of a playlist. `track_id` is prefixed; the snapshot
+/// fields let the UI render an entry even when its library is gone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlaylistTrack {
+    pub playlist_id: String,
+    pub position: i64,
+    pub track_id: TrackId,
+    pub library_id: String,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub added_at: i64,
+}
+
+/// One play-history row from the global database.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayHistoryEntry {
+    pub id: i64,
+    pub track_id: TrackId,
+    pub library_id: String,
+    pub started_at: i64,
+    pub played_ms: Option<i64>,
+    pub completed: bool,
 }
 
 /// The provider seam — an enum wrapper (mirroring

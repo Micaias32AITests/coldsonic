@@ -3,17 +3,18 @@
 //! The list is windowed by [`lazy_list`], so only visible rows are built. Cover
 //! fetching follows the visible window rather than the whole library.
 
-use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use bytes::Bytes;
 use iced_fonts::lucide;
 
-use crate::library::{CoverId, Manager, Track};
+use crate::library::{CoverId, Manager, ManagerHandle, Track};
 use crate::prelude::*;
 use crate::widget::lazy_list::lazy_list;
 
+use super::covers::{CoverMap, CoverState};
 use super::fmt_duration;
+use super::load_state::LoadState;
 
 const ROW_HEIGHT: f32 = 56.0;
 const COVER_DISPLAY: f32 = 48.0;
@@ -23,24 +24,18 @@ const OVERSCAN: usize = 3;
 
 #[derive(Debug)]
 pub struct State {
-    rows: Vec<Track>,
-    covers: HashMap<CoverId, CoverState>,
+    load: LoadState<Vec<Track>>,
+    covers: CoverMap,
     visible: Range<usize>,
-    loaded: bool,
-    error: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-enum CoverState {
-    Loading,
-    Loaded(image::Handle),
-    Failed,
+    revision: u64,
+    dirty: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum Msg {
-    Loaded(Vec<Track>),
-    LoadFailed(String),
+    Loaded { revision: u64, tracks: Vec<Track> },
+    LoadFailed { revision: u64, error: String },
+    Reload,
     Scrolled(iced::widget::scrollable::Viewport),
     CoverLoaded(CoverId, Result<Bytes, ()>),
     Play(Track),
@@ -51,39 +46,55 @@ pub enum Event {
     PlayTrack(Track),
 }
 
-pub fn init(manager: Arc<Manager>) -> (State, Task<Msg>) {
+pub fn init(handle: ManagerHandle, revision: u64) -> (State, Task<Msg>) {
     (
         State {
-            rows: Vec::new(),
-            covers: HashMap::new(),
+            load: LoadState::Loading,
+            covers: CoverMap::default(),
             visible: 0..INITIAL_ROWS,
-            loaded: false,
-            error: None,
+            revision,
+            dirty: false,
         },
-        Task::perform(
-            async move { manager.tracks().await },
-            |result| match result {
-                Ok(tracks) => Msg::Loaded(tracks),
-                Err(err) => Msg::LoadFailed(err.to_string()),
-            },
-        ),
+        fetch(handle, revision),
     )
 }
 
-pub fn update(state: &mut State, manager: &Arc<Manager>, msg: Msg) -> Action<Msg, Event> {
+fn fetch(handle: ManagerHandle, revision: u64) -> Task<Msg> {
+    Task::perform(
+        async move { handle.tracks().await },
+        move |result| match result {
+            Ok(tracks) => Msg::Loaded { revision, tracks },
+            Err(err) => Msg::LoadFailed {
+                revision,
+                error: err.to_string(),
+            },
+        },
+    )
+}
+
+pub fn update(state: &mut State, manager: &Manager, msg: Msg) -> Action<Msg, Event> {
     match msg {
-        Msg::Loaded(tracks) => {
-            state.rows = tracks;
-            state.loaded = true;
-            state.error = None;
-            state.visible = 0..INITIAL_ROWS.min(state.rows.len());
+        Msg::Reload => {
+            state.dirty = true;
+            Action::task(fetch(manager.handle(), state.revision))
+        }
+        Msg::Loaded { revision, tracks } => {
+            if revision != state.revision {
+                return Action::none();
+            }
+            state.dirty = false;
+            state.covers.clear();
+            state.load = LoadState::Loaded(tracks);
+            state.visible = 0..INITIAL_ROWS;
             refresh_covers(state, manager)
         }
-        Msg::LoadFailed(error) => {
-            state.rows.clear();
+        Msg::LoadFailed { revision, error } => {
+            if revision != state.revision {
+                return Action::none();
+            }
+            state.dirty = false;
             state.covers.clear();
-            state.loaded = true;
-            state.error = Some(error);
+            state.load = LoadState::Error(error);
             Action::none()
         }
         Msg::Scrolled(viewport) => {
@@ -91,31 +102,33 @@ pub fn update(state: &mut State, manager: &Arc<Manager>, msg: Msg) -> Action<Msg
             refresh_covers(state, manager)
         }
         Msg::CoverLoaded(id, result) => {
-            let Some(cover) = state.covers.get_mut(&id) else {
-                return Action::none();
-            };
-            *cover = match result {
-                Ok(bytes) => CoverState::Loaded(image::Handle::from_bytes(bytes)),
-                Err(_) => CoverState::Failed,
-            };
+            state.covers.apply(id, result);
             Action::none()
         }
         Msg::Play(track) => Action::emit(Event::PlayTrack(track)),
     }
 }
 
+impl State {
+    pub fn mark_dirty(&mut self, revision: u64) {
+        self.revision = revision;
+        self.dirty = true;
+        self.covers.clear();
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+}
+
 pub fn view(state: &State) -> Element<'_, Msg> {
-    if !state.loaded {
-        return centered_muted("loading...");
-    }
-
-    if let Some(error) = &state.error {
-        return centered_muted(error.clone());
-    }
-
-    if state.rows.is_empty() {
-        return centered_muted("No tracks found");
-    }
+    let tracks = match &state.load {
+        LoadState::Loading => return centered_muted("loading..."),
+        LoadState::Error(error) => return centered_muted(error.clone()),
+        LoadState::NotFound => return centered_muted("No tracks found"),
+        LoadState::Loaded(tracks) if tracks.is_empty() => return centered_muted("No tracks found"),
+        LoadState::Loaded(tracks) => tracks,
+    };
 
     let header = widget::row![
         widget::container(text("")).width(COVER_DISPLAY),
@@ -141,7 +154,7 @@ pub fn view(state: &State) -> Element<'_, Msg> {
     .padding(Padding::from([4, 8]));
 
     let covers = &state.covers;
-    let list = lazy_list(&state.rows, ROW_HEIGHT, move |_index, track: &Track| {
+    let list = lazy_list(tracks, ROW_HEIGHT, move |_index, track: &Track| {
         track_row(covers, track)
     })
     .on_scroll(Msg::Scrolled)
@@ -154,7 +167,7 @@ pub fn view(state: &State) -> Element<'_, Msg> {
         .into()
 }
 
-fn track_row<'a>(covers: &'a HashMap<CoverId, CoverState>, track: &'a Track) -> Element<'a, Msg> {
+fn track_row<'a>(covers: &'a CoverMap, track: &'a Track) -> Element<'a, Msg> {
     widget::row![
         cover_cell(covers, track.cover.as_ref()),
         text(&track.title)
@@ -187,10 +200,7 @@ fn track_row<'a>(covers: &'a HashMap<CoverId, CoverState>, track: &'a Track) -> 
     .into()
 }
 
-fn cover_cell<'a>(
-    covers: &'a HashMap<CoverId, CoverState>,
-    cover: Option<&CoverId>,
-) -> Element<'a, Msg> {
+fn cover_cell<'a>(covers: &'a CoverMap, cover: Option<&'a CoverId>) -> Element<'a, Msg> {
     match cover.and_then(|id| covers.get(id)) {
         Some(CoverState::Loaded(handle)) => image(handle.clone())
             .filter_method(image::FilterMethod::Linear)
@@ -206,40 +216,25 @@ fn cover_cell<'a>(
     }
 }
 
-fn refresh_covers(state: &mut State, manager: &Arc<Manager>) -> Action<Msg, Event> {
-    let len = state.rows.len();
+fn refresh_covers(state: &mut State, manager: &Manager) -> Action<Msg, Event> {
+    let Some(tracks) = state.load.loaded() else {
+        return Action::none();
+    };
+    let len = tracks.len();
     let start = state.visible.start.min(len);
     let end = state.visible.end.min(len).max(start);
     state.visible = start..end;
 
-    let mut wanted: HashSet<CoverId> = HashSet::new();
-    for track in &state.rows[start..end] {
-        if let Some(cover) = &track.cover {
-            wanted.insert(cover.clone());
-        }
-    }
+    let wanted: Vec<CoverId> = tracks[start..end]
+        .iter()
+        .filter_map(|track| track.cover.clone())
+        .collect();
 
-    state.covers.retain(|id, _| wanted.contains(id));
-
-    let mut tasks = Vec::new();
-    for id in wanted {
-        if state.covers.contains_key(&id) {
-            continue;
-        }
-        state.covers.insert(id.clone(), CoverState::Loading);
-        let manager = Arc::clone(manager);
-        let fetch = id.clone();
-        tasks.push(Task::perform(
-            async move { manager.cover(&fetch, COVER_PX).await },
-            move |result| Msg::CoverLoaded(id, result.map_err(|_| ())),
-        ));
-    }
-
-    if tasks.is_empty() {
-        Action::none()
-    } else {
-        Action::task(Task::batch(tasks))
-    }
+    let task = state
+        .covers
+        .sync(wanted, COVER_PX, &manager.handle())
+        .map(|(id, result)| Msg::CoverLoaded(id, result));
+    Action::task(task)
 }
 
 fn visible_range(viewport: &iced::widget::scrollable::Viewport) -> Range<usize> {

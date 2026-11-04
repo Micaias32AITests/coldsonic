@@ -122,10 +122,10 @@ fn refresh(state: &mut State, ctx: Ctx<'_>) -> Action<Msg, Event> {
             continue;
         }
         state.covers.insert(id.clone(), CoverState::Loading);
-        let manager = Arc::clone(ctx.manager);
+        let handle = ctx.manager.handle();
         let fetch = id.clone();
         tasks.push(Task::perform(
-            async move { manager.cover(&fetch, COVER_PX).await },
+            async move { handle.cover(&fetch, COVER_PX).await },
             move |res| Msg::CoverLoaded(id, res.map_err(|_| ())),
         ));
     }

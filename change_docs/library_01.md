@@ -26,6 +26,13 @@ three facets:
 Facets 1–2 are separate, verifiable milestones; Facet 3 waits until the server
 is back.
 
+> **Status (library database 01).** The ownership and storage details below
+> have been superseded: `MainScreen` now owns `Manager` by value, async work
+> gets a `ManagerHandle`, metadata lives in per-library SQLite databases, and
+> scans run in background tasks instead of at open. See
+> `change_docs/library_database_01.md`. The provider seam, neutral types, and
+> config remain as described here.
+
 ## Locked in decisions
 
 - **The manager is the only seam the UI touches.** `MainScreen` owns

@@ -6,8 +6,11 @@
 use bytes::Bytes;
 use iced_fonts::lucide;
 
-use crate::library::{Album, AlbumId, CoverId, Manager};
+use crate::library::{Album, AlbumId, CoverId, Manager, ManagerHandle};
 use crate::prelude::*;
+
+use super::covers::{CoverMap, CoverState};
+use super::load_state::LoadState;
 
 /// Logical size of the cover cell in the table.
 const COVER_DISPLAY: f32 = 48.0;
@@ -17,29 +20,17 @@ const COVER_PX: u32 = 96;
 
 #[derive(Debug)]
 pub struct State {
-    rows: Vec<Row>,
-    loaded: bool,
-    error: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct Row {
-    album: Album,
-    cover: CoverState,
-}
-
-#[derive(Debug, Clone)]
-enum CoverState {
-    NotLoaded,
-    Loading,
-    Loaded(image::Handle),
-    Failed,
+    load: LoadState<Vec<Album>>,
+    covers: CoverMap,
+    revision: u64,
+    dirty: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum Msg {
-    Loaded(Vec<Album>),
-    LoadFailed(String),
+    Loaded { revision: u64, albums: Vec<Album> },
+    LoadFailed { revision: u64, error: String },
+    Reload,
     AlbumClicked(AlbumId),
     CoverLoaded(CoverId, Result<Bytes, ()>),
 }
@@ -49,137 +40,125 @@ pub enum Event {
     AlbumClicked(AlbumId),
 }
 
-pub fn init(manager: Arc<Manager>) -> (State, Task<Msg>) {
+pub fn init(handle: ManagerHandle, revision: u64) -> (State, Task<Msg>) {
     (
         State {
-            rows: Vec::new(),
-            loaded: false,
-            error: None,
+            load: LoadState::Loading,
+            covers: CoverMap::default(),
+            revision,
+            dirty: false,
         },
-        Task::perform(
-            async move { manager.albums().await },
-            |result| match result {
-                Ok(albums) => Msg::Loaded(albums),
-                Err(err) => Msg::LoadFailed(err.to_string()),
-            },
-        ),
+        fetch(handle, revision),
     )
 }
 
-pub fn update(state: &mut State, manager: &Arc<Manager>, msg: Msg) -> Action<Msg, Event> {
+fn fetch(handle: ManagerHandle, revision: u64) -> Task<Msg> {
+    Task::perform(
+        async move { handle.albums().await },
+        move |result| match result {
+            Ok(albums) => Msg::Loaded { revision, albums },
+            Err(err) => Msg::LoadFailed {
+                revision,
+                error: err.to_string(),
+            },
+        },
+    )
+}
+
+pub fn update(state: &mut State, manager: &Manager, msg: Msg) -> Action<Msg, Event> {
     match msg {
-        Msg::Loaded(albums) => {
-            let mut rows = Vec::with_capacity(albums.len());
-            let mut tasks = Vec::new();
-
-            for album in albums {
-                let cover = if let Some(id) = album.cover.clone() {
-                    tasks.push(cover_task(manager, id));
-                    CoverState::Loading
-                } else {
-                    CoverState::NotLoaded
-                };
-                rows.push(Row { album, cover });
-            }
-
-            state.rows = rows;
-            state.loaded = true;
-            state.error = None;
-            tasks_to_action(tasks)
+        Msg::Reload => {
+            state.dirty = true;
+            Action::task(fetch(manager.handle(), state.revision))
         }
-        Msg::LoadFailed(error) => {
-            state.rows.clear();
-            state.loaded = true;
-            state.error = Some(error);
+        Msg::Loaded { revision, albums } => {
+            if revision != state.revision {
+                return Action::none();
+            }
+            state.dirty = false;
+            state.covers.clear();
+            let wanted: Vec<CoverId> = albums
+                .iter()
+                .filter_map(|album| album.cover.clone())
+                .collect();
+            state.load = LoadState::Loaded(albums);
+            let task = state
+                .covers
+                .sync(wanted, COVER_PX, &manager.handle())
+                .map(|(id, result)| Msg::CoverLoaded(id, result));
+            Action::task(task)
+        }
+        Msg::LoadFailed { revision, error } => {
+            if revision != state.revision {
+                return Action::none();
+            }
+            state.dirty = false;
+            state.covers.clear();
+            state.load = LoadState::Error(error);
             Action::none()
         }
         Msg::AlbumClicked(id) => Action::emit(Event::AlbumClicked(id)),
         Msg::CoverLoaded(id, result) => {
-            if let Some(row) = state
-                .rows
-                .iter_mut()
-                .find(|row| row.album.cover.as_ref() == Some(&id))
-            {
-                row.cover = cover_from_result(result);
-            }
+            state.covers.apply(id, result);
             Action::none()
         }
     }
 }
 
+impl State {
+    pub fn mark_dirty(&mut self, revision: u64) {
+        self.revision = revision;
+        self.dirty = true;
+        self.covers.clear();
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+}
+
 pub fn view(state: &State) -> Element<'_, Msg> {
-    if !state.loaded {
-        return centered_muted("loading...");
-    }
-
-    if let Some(error) = &state.error {
-        return centered_muted(error.clone());
-    }
-
-    if state.rows.is_empty() {
-        return centered_muted("No albums found");
-    }
-
-    let list = table(
-        [
-            table::column(text(""), |row: Row| cover_cell(row)),
-            table::column(text("Album"), |row: Row| {
-                Element::from(
-                    button(text(row.album.name.clone()))
-                        .on_press(Msg::AlbumClicked(row.album.id.clone())),
-                )
-            })
-            .width(Fill),
-            table::column(text("Artist"), |row: Row| {
-                text(row.album.artist.unwrap_or_default()).color([0.65, 0.65, 0.65])
-            }),
-            table::column(text("Songs"), |row: Row| {
-                text(row.album.song_count.to_string())
-            }),
-            table::column(text("Duration"), |row: Row| {
-                text(
-                    row.album
-                        .duration
-                        .map(super::fmt_duration)
-                        .unwrap_or_default(),
-                )
-                .color([0.6, 0.6, 0.6])
-            }),
-        ],
-        state.rows.clone(),
-    )
-    .width(Fill);
-
-    scrollable(list).width(Fill).height(Fill).into()
-}
-
-fn cover_task(manager: &Arc<Manager>, id: CoverId) -> Task<Msg> {
-    let manager = Arc::clone(manager);
-    let returned_id = id.clone();
-    Task::perform(
-        async move { manager.cover(&id, COVER_PX).await },
-        move |result| Msg::CoverLoaded(returned_id, result.map_err(|_| ())),
-    )
-}
-
-fn tasks_to_action(tasks: Vec<Task<Msg>>) -> Action<Msg, Event> {
-    if tasks.is_empty() {
-        Action::none()
-    } else {
-        Action::task(Task::batch(tasks))
+    match &state.load {
+        LoadState::Loading => centered_muted("loading..."),
+        LoadState::Error(error) => centered_muted(error.clone()),
+        LoadState::NotFound => centered_muted("No albums found"),
+        LoadState::Loaded(albums) if albums.is_empty() => centered_muted("No albums found"),
+        LoadState::Loaded(albums) => {
+            let covers = &state.covers;
+            let list = table(
+                [
+                    table::column(text(""), |album: Album| {
+                        cover_cell(covers, album.cover.clone())
+                    }),
+                    table::column(text("Album"), |album: Album| {
+                        Element::from(
+                            button(text(album.name.clone()))
+                                .on_press(Msg::AlbumClicked(album.id.clone())),
+                        )
+                    })
+                    .width(Fill),
+                    table::column(text("Artist"), |album: Album| {
+                        text(album.artist.unwrap_or_default()).color([0.65, 0.65, 0.65])
+                    }),
+                    table::column(text("Songs"), |album: Album| {
+                        text(album.song_count.to_string())
+                    }),
+                    table::column(text("Duration"), |album: Album| {
+                        text(album.duration.map(super::fmt_duration).unwrap_or_default())
+                            .color([0.6, 0.6, 0.6])
+                    }),
+                ],
+                albums.clone(),
+            )
+            .width(Fill);
+            scrollable(list).width(Fill).height(Fill).into()
+        }
     }
 }
 
-fn cover_from_result(result: Result<Bytes, ()>) -> CoverState {
-    match result {
-        Ok(bytes) => CoverState::Loaded(image::Handle::from_bytes(bytes)),
-        Err(_) => CoverState::Failed,
-    }
-}
-
-fn cover_cell(row: Row) -> Element<'static, Msg> {
-    match row.cover {
-        CoverState::Loaded(handle) => image(handle)
+fn cover_cell<'a>(covers: &'a CoverMap, cover: Option<CoverId>) -> Element<'a, Msg> {
+    match cover.as_ref().and_then(|id| covers.get(id)) {
+        Some(CoverState::Loaded(handle)) => image(handle.clone())
             .filter_method(image::FilterMethod::Linear)
             .width(COVER_DISPLAY)
             .height(COVER_DISPLAY)

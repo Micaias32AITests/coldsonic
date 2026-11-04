@@ -1,14 +1,13 @@
 //! Real playback engine — same seam as the mock, rodio + library fetch.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use iced::Task;
 
 use crate::Action;
-use crate::library::Manager;
+use crate::library::ManagerHandle;
 
 use super::player::AudioPlayer;
 use super::queue::{Queue, QueueEntry};
@@ -16,7 +15,7 @@ use super::{EngineError, EngineEvent, EngineMsg, NowPlaying, PlaybackState, Trac
 
 #[derive(Debug)]
 pub struct RealEngine {
-    manager: Arc<Manager>,
+    manager: ManagerHandle,
     player: AudioPlayer,
     queue: Queue,
     /// Bytes of the current track, kept so seek-fallback / Prev-restart can
@@ -31,7 +30,7 @@ pub struct RealEngine {
 }
 
 impl RealEngine {
-    pub fn open(manager: Arc<Manager>) -> Self {
+    pub fn open(manager: ManagerHandle) -> Self {
         Self {
             manager,
             player: AudioPlayer::open(),

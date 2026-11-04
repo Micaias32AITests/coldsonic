@@ -848,3 +848,26 @@ SQLX_OFFLINE=true cargo check
   snapshots.
 - **Playlist UI** is not in scope; only schema and manager methods.
 - **Network shares** are explicitly unsupported.
+
+## 20. Implementation notes
+
+Deviations from the plan as written, kept here so the code and doc agree:
+
+- **Static SQL uses runtime `sqlx::query` / `query_scalar`, not the `query!`
+  macros.** This avoids a build-time `DATABASE_URL`/`.sqlx` dependency and the
+  combined dev database for the two disjoint schemas. The statements still
+  live in the two `db` modules, so moving to compile-time checks later is
+  localized.
+- **Manual rescan lives in Settings**, not the library-setup shell: the shell
+  has no live `Manager` once the main screen is open. `Settings` emits
+  `Event::RescanLibraries` and `MainScreen` forces a scan of every library.
+- **`OfflineHandle` also carries the per-library cover cache directory** in
+  addition to identifier/root/pool, because cover reads need the cached blob
+  path without another lookup.
+- **`Catalog` is `Debug` and `CoverSource` is `Clone`** for the manager and
+  scanner plumbing.
+- **Cover dedupe** is `screen::covers::CoverMap`; list screens sync it with the
+  ids they want and apply results by `CoverId`.
+- **No `SQLX_OFFLINE=true` step is required** while the runtime query API is in
+  use. Reintroduce it together with `cargo sqlx prepare` if the code moves to
+  the macros.

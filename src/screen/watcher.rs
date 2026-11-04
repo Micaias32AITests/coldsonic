@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use notify::RecursiveMode;
-use notify_debouncer_full::{DebounceEventResult, new_debouncer};
+use notify_debouncer_full::{DebounceEventResult, DebouncedEvent, new_debouncer};
 
 use crate::library::{ManagerEvent, ManagerHandle};
 use crate::prelude::*;
@@ -30,7 +30,7 @@ pub fn watcher_stream(
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
             let debouncer = new_debouncer(DEBOUNCE, None, move |result: DebounceEventResult| {
                 if let Ok(events) = result
-                    && !events.is_empty()
+                    && events.iter().any(is_content_change)
                 {
                     let _ = tx.send(());
                 }
@@ -55,6 +55,12 @@ pub fn watcher_stream(
             }
         },
     ))
+}
+
+/// Access events are produced by opening/reading files — including the scan
+/// itself. Treating them as changes would make every scan queue another one.
+fn is_content_change(event: &DebouncedEvent) -> bool {
+    !event.event.kind.is_access()
 }
 
 /// Build a subscription from the manager's broadcast receiver.

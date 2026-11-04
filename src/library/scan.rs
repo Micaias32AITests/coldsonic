@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lofty::prelude::{Accessor, AudioFile, TaggedFileExt};
+use tracing::info;
 
 use crate::library::db::library::{CoverKind, FileStat, LibraryDb, ScanSignature};
 use crate::library::manager::{LibraryHandle, ScanOutcome, ScanPlan};
@@ -141,6 +142,8 @@ struct CoverSource {
 
 /// Blocking walk + tag pass. Call from `spawn_blocking`.
 pub fn walk_and_tag(root: &Path, mode: ScanMode, never_split: &[String]) -> io::Result<ScanData> {
+    info!(root = root.to_str(), "walk_and_tag started");
+
     if !root.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -275,6 +278,9 @@ pub fn check(root: &Path, files: &HashMap<String, FileStat>) -> io::Result<ScanC
 /// handoff for the actual metadata.
 pub async fn library(plan: ScanPlan, force: bool) -> ScanOutcome {
     let library = plan.library.clone();
+    // Manager state already rejects overlapping scans; this guard keeps the
+    // guarantee even if a caller bypasses it.
+    let _guard = plan.scan_lock.clone().lock_owned().await;
     let result = run(plan, force).await;
     ScanOutcome { library, result }
 }

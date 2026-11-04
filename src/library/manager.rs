@@ -49,6 +49,8 @@ struct Catalog {
 struct Opened {
     config: LibraryConfig,
     library: Library,
+    /// Serializes scans of this library even if two tasks are spawned.
+    scan_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Read-only routing snapshot handed to tasks and the engine.
@@ -65,6 +67,7 @@ pub struct ScanPlan {
     pub library: String,
     pub config: LibraryConfig,
     pub handle: LibraryHandle,
+    pub(crate) scan_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +172,7 @@ impl Manager {
             libraries.push(Opened {
                 config: config.clone(),
                 library: Library::Offline(offline),
+                scan_lock: Arc::new(tokio::sync::Mutex::new(())),
             });
         }
 
@@ -530,6 +534,7 @@ impl Catalog {
                 handle: match &opened.library {
                     Library::Offline(offline) => LibraryHandle::Offline(offline.handle()),
                 },
+                scan_lock: Arc::clone(&opened.scan_lock),
             })
             .collect()
     }

@@ -1,10 +1,16 @@
 //! Artist detail: the selected artist's header and albums.
+//!
+//! The album list is virtualized so a prolific artist's page does not shape
+//! every row on the UI thread before the first frame appears.
+
+use std::ops::Range;
 
 use bytes::Bytes;
 use iced_fonts::lucide;
 
 use crate::library::{Album, AlbumId, ArtistDetail, ArtistId, CoverId, Manager, ManagerHandle};
 use crate::prelude::*;
+use crate::widget::lazy_list::{lazy_list, visible_range};
 
 use super::covers::{CoverMap, CoverState};
 use super::load_state::{LoadError, LoadState};
@@ -16,11 +22,16 @@ const HEADER_COVER_DISPLAY: f32 = 128.0;
 /// Pixel size requested for row covers (2x the 48 px display).
 const ROW_COVER_DISPLAY: f32 = 48.0;
 
+const ROW_HEIGHT: f32 = 56.0;
+const INITIAL_ROWS: usize = 32;
+const OVERSCAN: usize = 3;
+
 #[derive(Debug)]
 pub struct State {
     id: ArtistId,
     load: LoadState<ArtistDetail>,
     covers: CoverMap,
+    visible: Range<usize>,
     revision: u64,
     dirty: bool,
 }
@@ -33,6 +44,7 @@ pub enum Msg {
         result: Result<ArtistDetail, LoadError>,
     },
     Reload,
+    Scrolled(iced::widget::scrollable::Viewport),
     CoverLoaded(CoverId, Result<Bytes, ()>),
     AlbumClicked(AlbumId),
     Shuffle,
@@ -51,6 +63,7 @@ pub fn init(id: ArtistId, handle: ManagerHandle, revision: u64) -> (State, Task<
             id,
             load: LoadState::Loading,
             covers: CoverMap::default(),
+            visible: 0..INITIAL_ROWS,
             revision,
             dirty: false,
         },
@@ -86,17 +99,12 @@ pub fn update(state: &mut State, manager: &Manager, msg: Msg) -> Action<Msg, Eve
             state.dirty = false;
             state.covers.clear();
             state.load = super::load_state::load_state(result);
-
-            let mut wanted = Vec::new();
-            if let Some(detail) = state.load.loaded() {
-                wanted.extend(detail.artist.cover.clone());
-                wanted.extend(detail.albums.iter().filter_map(|album| album.cover.clone()));
-            }
-            let task = state
-                .covers
-                .sync(wanted, HEADER_COVER_PX, &manager.handle())
-                .map(|(id, result)| Msg::CoverLoaded(id, result));
-            Action::task(task)
+            state.visible = 0..INITIAL_ROWS;
+            refresh_covers(state, manager)
+        }
+        Msg::Scrolled(viewport) => {
+            state.visible = visible_range(&viewport, ROW_HEIGHT, OVERSCAN);
+            refresh_covers(state, manager)
         }
         Msg::CoverLoaded(id, result) => {
             state.covers.apply(id, result);
@@ -156,36 +164,66 @@ pub fn view(state: &State) -> Element<'_, Msg> {
         centered_muted("No albums")
     } else {
         let covers = &state.covers;
-        let list = table(
-            [
-                table::column(text(""), |album: Album| {
-                    cover_cell(covers, album.cover.clone())
-                }),
-                table::column(text("Album"), |album: Album| {
-                    Element::from(
-                        button(text(album.name.clone()))
-                            .on_press(Msg::AlbumClicked(album.id.clone())),
-                    )
-                })
-                .width(Fill),
-                table::column(text("Artist"), |album: Album| {
-                    text(album.artist.unwrap_or_default()).color([0.65, 0.65, 0.65])
-                }),
-                table::column(text("Songs"), |album: Album| {
-                    text(album.song_count.to_string())
-                }),
-            ],
-            detail.albums.clone(),
-        )
-        .width(Fill);
+        let list = lazy_list(&detail.albums, ROW_HEIGHT, move |_index, album: &Album| {
+            album_row(covers, album)
+        })
+        .on_scroll(Msg::Scrolled)
+        .width(Fill)
+        .height(Fill);
 
-        scrollable(list).width(Fill).height(Fill).into()
+        widget::column![album_header(), list]
+            .width(Fill)
+            .height(Fill)
+            .into()
     };
 
     widget::column![header, body]
         .width(Fill)
         .height(Fill)
         .into()
+}
+
+fn album_header() -> Element<'static, Msg> {
+    widget::row![
+        widget::container(text("")).width(ROW_COVER_DISPLAY),
+        text("Album")
+            .size(11)
+            .color([0.55, 0.55, 0.55])
+            .width(FillPortion(4)),
+        text("Artist")
+            .size(11)
+            .color([0.55, 0.55, 0.55])
+            .width(FillPortion(3)),
+        text("Songs").size(11).color([0.55, 0.55, 0.55]).width(56),
+    ]
+    .spacing(10)
+    .padding(Padding::from([4, 8]))
+    .into()
+}
+
+fn album_row<'a>(covers: &'a CoverMap, album: &'a Album) -> Element<'a, Msg> {
+    widget::row![
+        cover_cell(covers, album.cover.clone()),
+        button(
+            text(&album.name)
+                .size(14)
+                .wrapping(iced::widget::text::Wrapping::None)
+        )
+        .on_press(Msg::AlbumClicked(album.id.clone()))
+        .width(FillPortion(4)),
+        text(album.artist.as_deref().unwrap_or(""))
+            .size(12)
+            .color([0.65, 0.65, 0.65])
+            .wrapping(iced::widget::text::Wrapping::None)
+            .width(FillPortion(3)),
+        text(album.song_count.to_string()).width(56),
+    ]
+    .align_y(Center)
+    .spacing(10)
+    .padding(Padding::from([4, 8]))
+    .height(ROW_HEIGHT)
+    .width(Fill)
+    .into()
 }
 
 fn header_cover_view(cover: Option<&CoverState>, size: f32) -> Element<'static, Msg> {
@@ -218,6 +256,32 @@ fn cover_cell<'a>(covers: &'a CoverMap, cover: Option<CoverId>) -> Element<'a, M
             .align_y(Center)
             .into(),
     }
+}
+
+fn refresh_covers(state: &mut State, manager: &Manager) -> Action<Msg, Event> {
+    let Some(detail) = state.load.loaded() else {
+        return Action::none();
+    };
+    let len = detail.albums.len();
+    let start = state.visible.start.min(len);
+    let end = state.visible.end.min(len).max(start);
+    state.visible = start..end;
+
+    let mut wanted: Vec<CoverId> = Vec::new();
+    if let Some(cover) = detail.artist.cover.clone() {
+        wanted.push(cover);
+    }
+    wanted.extend(
+        detail.albums[start..end]
+            .iter()
+            .filter_map(|album| album.cover.clone()),
+    );
+
+    let task = state
+        .covers
+        .sync(wanted, HEADER_COVER_PX, &manager.handle())
+        .map(|(id, result)| Msg::CoverLoaded(id, result));
+    Action::task(task)
 }
 
 fn centered_muted(message: impl Into<String>) -> Element<'static, Msg> {

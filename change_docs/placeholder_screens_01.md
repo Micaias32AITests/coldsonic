@@ -220,12 +220,14 @@ On `CoverLoaded`, update the matching album row or the header cover.
 
 - Header: 128 px square cover, artist name at size 20–24, album count at size
   12 and muted, and a `lucide::shuffle` button when the artist has albums.
-- Album list: `table` with columns
+- Album list: virtualized with `lazy_list` under a fixed header row, with
+  columns
   - 48 px cover,
   - album name as a `button` that emits `Msg::AlbumClicked`,
   - artist name (muted; the artist line is useful for merged libraries),
   - `N songs`.
-- Wrap the table in a `scrollable`, `Fill` × `Fill`.
+- `Msg::Scrolled` updates `visible`; covers are fetched only for the visible
+  window (the header cover is always included).
 - Empty state after loading: centered muted “No albums”.
 - Loading: centered “loading...”, matching the artists screen.
 - Error: centered muted error text with the same table absent.
@@ -302,7 +304,7 @@ On `Loaded`:
   artist, song count, total duration (sum of track durations). Omit optional
   pieces cleanly instead of leaving dangling separators.
 - `Play album` button emits `Msg::PlayAll`.
-- Track list: `table` inside a `scrollable` with columns
+- Track list: `lazy_list` under a fixed header row, with columns
   - track number (`track_no`, blank when absent),
   - title as a `button` that emits `Msg::PlayTrack(track.clone())`,
   - artist (muted),
@@ -457,10 +459,11 @@ pub enum Event {
 ```
 
 - On `Loaded`, build rows, mark covers `Loading`, and spawn one fetch per unique
-  cover id. This mirrors the artists table.
+  cover id in the initial visible window. `Msg::Scrolled` narrows the window on
+  scroll. This mirrors the artists list.
 - `AlbumClicked` emits `Event::AlbumClicked`.
-- `view` is a table with columns: 48 px cover, album name as a navigation
-  button, artist, `N songs`, and duration. Wrap in a `scrollable`.
+- `view` is a `lazy_list` under a fixed header row with columns: 48 px cover,
+  album name as a navigation button, artist, `N songs`, and duration.
 - Empty state: “No albums found”. Loading: “loading...”. Failure: muted error
   text.
 
@@ -528,9 +531,9 @@ pub enum Event {
 
 - Use `crate::widget::lazy_list::lazy_list(&state.rows, ROW_HEIGHT, ...)` inside
   the view. The list owns the scrollable; put a fixed header row above it.
-- `Msg::Scrolled` updates `visible` using the same arithmetic as
-  `queue::visible_range` (clamped offset, viewport height, overscan). Keep the
-  helper local for now; extract it only when a third screen needs it.
+- `Msg::Scrolled` updates `visible` with the shared
+  `lazy_list::visible_range` helper (clamped offset, viewport height,
+  overscan), which every virtualized list uses.
 - After `Loaded`, set `rows`, seed `visible` to `0..INITIAL_ROWS`, and run the
   same cover-refresh logic as the queue screen: keep only covers in the current
   window, skip ids already `Loading`/`Loaded`/`Failed`, spawn 96 px fetches for
@@ -655,8 +658,6 @@ Manual:
   `library_01.md` keeps that future work.
 - Themes, visualizer, lyrics, equalizer, and other settings entries.
 - Sorting/filtering/search on Albums or All Tracks.
-- Virtualizing the Albums table; it starts with the same full-table approach as
-  Artists. Migrate it to `lazy_list` if large libraries make it necessary.
 - Inline back buttons, context menus, and multi-select.
 - An album-detail shuffle action; only `Play album` is planned for now. Artist
   shuffle reuses the existing artist-shuffle path.

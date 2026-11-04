@@ -1,4 +1,7 @@
 //! Album detail: the selected album's header and tracks.
+//!
+//! Tracks use the same virtualized list as `all_tracks`, so opening a large
+//! album does not lay out every row before the first frame.
 
 use std::time::Duration;
 
@@ -7,6 +10,7 @@ use iced_fonts::lucide;
 
 use crate::library::{AlbumDetail, AlbumId, CoverId, Manager, ManagerHandle, Track};
 use crate::prelude::*;
+use crate::widget::lazy_list::lazy_list;
 
 use super::fmt_duration;
 use super::load_state::{LoadError, LoadState};
@@ -14,6 +18,8 @@ use super::load_state::{LoadError, LoadState};
 /// Pixel size requested for the header cover (2x the 128 px display).
 const HEADER_COVER_PX: u32 = 256;
 const HEADER_COVER_DISPLAY: f32 = 128.0;
+
+const ROW_HEIGHT: f32 = 56.0;
 
 #[derive(Debug)]
 pub struct State {
@@ -182,45 +188,77 @@ pub fn view(state: &State) -> Element<'_, Msg> {
     let body: Element<'_, Msg> = if detail.songs.is_empty() {
         centered_muted("No songs")
     } else {
-        let list = table(
-            [
-                table::column(text("#"), |row: Track| {
-                    text(row.track_no.map(|n| n.to_string()).unwrap_or_default())
-                        .color([0.6, 0.6, 0.6])
-                }),
-                table::column(text("Title"), |row: Track| {
-                    Element::from(
-                        button(text(row.title.clone()))
-                            .on_press(Msg::PlayTrack(row.clone()))
-                            .width(Fill),
-                    )
-                })
-                .width(Fill),
-                table::column(text("Artist"), |row: Track| {
-                    text(row.artist.clone().unwrap_or_default()).color([0.65, 0.65, 0.65])
-                }),
-                table::column(text("Duration"), |row: Track| {
-                    text(fmt_duration(row.duration)).color([0.6, 0.6, 0.6])
-                }),
-                table::column(text(""), |row: Track| {
-                    Element::from(
-                        button(lucide::play().size(14))
-                            .on_press(Msg::PlayTrack(row))
-                            .padding(4),
-                    )
-                }),
-            ],
-            detail.songs.clone(),
-        )
-        .width(Fill);
+        let list = lazy_list(&detail.songs, ROW_HEIGHT, |_index, row: &Track| {
+            track_row(row)
+        })
+        .width(Fill)
+        .height(Fill);
 
-        scrollable(list).width(Fill).height(Fill).into()
+        widget::column![track_header(), list]
+            .width(Fill)
+            .height(Fill)
+            .into()
     };
 
     widget::column![header, body]
         .width(Fill)
         .height(Fill)
         .into()
+}
+
+fn track_header() -> Element<'static, Msg> {
+    widget::row![
+        text("#").size(11).color([0.55, 0.55, 0.55]).width(32),
+        text("Title")
+            .size(11)
+            .color([0.55, 0.55, 0.55])
+            .width(FillPortion(4)),
+        text("Artist")
+            .size(11)
+            .color([0.55, 0.55, 0.55])
+            .width(FillPortion(3)),
+        text("Duration")
+            .size(11)
+            .color([0.55, 0.55, 0.55])
+            .width(80),
+        widget::container(text("")).width(32),
+    ]
+    .spacing(10)
+    .padding(Padding::from([4, 8]))
+    .into()
+}
+
+fn track_row<'a>(row: &'a Track) -> Element<'a, Msg> {
+    widget::row![
+        text(row.track_no.map(|n| n.to_string()).unwrap_or_default())
+            .color([0.6, 0.6, 0.6])
+            .width(32),
+        button(
+            text(&row.title)
+                .size(14)
+                .wrapping(iced::widget::text::Wrapping::None)
+        )
+        .on_press(Msg::PlayTrack(row.clone()))
+        .width(FillPortion(4)),
+        text(row.artist.as_deref().unwrap_or(""))
+            .size(12)
+            .color([0.65, 0.65, 0.65])
+            .wrapping(iced::widget::text::Wrapping::None)
+            .width(FillPortion(3)),
+        text(fmt_duration(row.duration))
+            .size(12)
+            .color([0.6, 0.6, 0.6])
+            .width(80),
+        button(lucide::play().size(14))
+            .on_press(Msg::PlayTrack(row.clone()))
+            .padding(4),
+    ]
+    .align_y(Center)
+    .spacing(10)
+    .padding(Padding::from([4, 8]))
+    .height(ROW_HEIGHT)
+    .width(Fill)
+    .into()
 }
 
 fn cover_task(handle: ManagerHandle, id: CoverId) -> Task<Msg> {

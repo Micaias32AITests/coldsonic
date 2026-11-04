@@ -29,6 +29,21 @@ const INITIAL_ROWS: usize = 32;
 /// Extra rows built above and below the visible area by default.
 pub const DEFAULT_OVERSCAN: usize = 3;
 
+/// Which item indices are visible (plus overscan) for a scroll viewport.
+///
+/// Screens with cover fetches use this to request covers only for rows that can
+/// actually be seen.
+pub fn visible_range(viewport: &Viewport, row_height: f32, overscan: usize) -> Range<usize> {
+    let offset = viewport.absolute_offset().y.max(0.0);
+    let height = viewport.bounds().height.max(0.0);
+    let row_height = row_height.max(1.0);
+
+    let first = (offset / row_height).floor() as usize;
+    let last = ((offset + height) / row_height).ceil() as usize;
+
+    first.saturating_sub(overscan)..last.saturating_add(overscan).max(first + 1)
+}
+
 /// Creates a [`LazyList`] with the default overscan.
 ///
 /// * `source` must be cheap to clone and iterate repeatedly without being

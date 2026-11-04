@@ -10,7 +10,7 @@ use iced_fonts::lucide;
 
 use crate::library::{CoverId, Manager, ManagerHandle, Track};
 use crate::prelude::*;
-use crate::widget::lazy_list::lazy_list;
+use crate::widget::lazy_list::{lazy_list, visible_range};
 
 use super::covers::{CoverMap, CoverState};
 use super::fmt_duration;
@@ -98,7 +98,7 @@ pub fn update(state: &mut State, manager: &Manager, msg: Msg) -> Action<Msg, Eve
             Action::none()
         }
         Msg::Scrolled(viewport) => {
-            state.visible = visible_range(&viewport);
+            state.visible = visible_range(&viewport, ROW_HEIGHT, OVERSCAN);
             refresh_covers(state, manager)
         }
         Msg::CoverLoaded(id, result) => {
@@ -235,16 +235,6 @@ fn refresh_covers(state: &mut State, manager: &Manager) -> Action<Msg, Event> {
         .sync(wanted, COVER_PX, &manager.handle())
         .map(|(id, result)| Msg::CoverLoaded(id, result));
     Action::task(task)
-}
-
-fn visible_range(viewport: &iced::widget::scrollable::Viewport) -> Range<usize> {
-    let offset = viewport.absolute_offset().y.max(0.0);
-    let height = viewport.bounds().height.max(0.0);
-
-    let first = (offset / ROW_HEIGHT).floor() as usize;
-    let last = ((offset + height) / ROW_HEIGHT).ceil() as usize;
-
-    first.saturating_sub(OVERSCAN)..last.saturating_add(OVERSCAN).max(first + 1)
 }
 
 fn centered_muted(message: impl Into<String>) -> Element<'static, Msg> {

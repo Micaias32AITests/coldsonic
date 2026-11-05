@@ -18,22 +18,23 @@ use crate::library::{
     LibraryError, ScanMode, Track, TrackId,
 };
 
-pub const SCHEMA_VERSION: &str = "1";
-pub const SCANNER_VERSION: &str = "1";
+pub const SCHEMA_VERSION: &str = "2";
+pub const SCANNER_VERSION: &str = "2";
 
 const TABLES: [&str; 5] = ["files", "tracks", "albums", "artists", "covers"];
 
-const SCHEMA: [&str; 14] = [
+const SCHEMA: [&str; 18] = [
     "CREATE TABLE IF NOT EXISTS meta (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
     )",
     "CREATE TABLE IF NOT EXISTS artists (
-        id          TEXT PRIMARY KEY,
-        name        TEXT NOT NULL,
-        sort_name   TEXT,
-        album_count INTEGER NOT NULL DEFAULT 0,
-        cover_id    TEXT
+        id           TEXT PRIMARY KEY,
+        name         TEXT NOT NULL,
+        sort_name    TEXT,
+        mb_artist_id TEXT,
+        album_count  INTEGER NOT NULL DEFAULT 0,
+        cover_id     TEXT
     )",
     "CREATE TABLE IF NOT EXISTS covers (
         id          TEXT PRIMARY KEY,
@@ -45,13 +46,18 @@ const SCHEMA: [&str; 14] = [
         size        INTEGER
     )",
     "CREATE TABLE IF NOT EXISTS albums (
-        id          TEXT PRIMARY KEY,
-        name        TEXT NOT NULL,
-        artist_id   TEXT REFERENCES artists(id) ON DELETE SET NULL,
-        artist_name TEXT,
-        song_count  INTEGER NOT NULL DEFAULT 0,
-        duration_ms INTEGER,
-        cover_id    TEXT REFERENCES covers(id) ON DELETE SET NULL
+        id                  TEXT PRIMARY KEY,
+        name                TEXT NOT NULL,
+        artist_id           TEXT REFERENCES artists(id) ON DELETE SET NULL,
+        artist_name         TEXT,
+        album_sort_name     TEXT,
+        compilation         INTEGER NOT NULL DEFAULT 0,
+        mb_release_id       TEXT,
+        mb_release_group_id TEXT,
+        disc_count          INTEGER,
+        song_count          INTEGER NOT NULL DEFAULT 0,
+        duration_ms         INTEGER,
+        cover_id            TEXT REFERENCES covers(id) ON DELETE SET NULL
     )",
     "CREATE TABLE IF NOT EXISTS tracks (
         id          TEXT PRIMARY KEY,
@@ -78,6 +84,10 @@ const SCHEMA: [&str; 14] = [
     "CREATE INDEX IF NOT EXISTS tracks_artist_idx ON tracks(artist_id)",
     "CREATE INDEX IF NOT EXISTS files_track_idx   ON files(track_id)",
     "CREATE INDEX IF NOT EXISTS artists_name_idx  ON artists(name)",
+    "CREATE INDEX IF NOT EXISTS artists_mb_idx    ON artists(mb_artist_id)",
+    "CREATE INDEX IF NOT EXISTS albums_artist_idx ON albums(artist_id)",
+    "CREATE INDEX IF NOT EXISTS albums_mb_release_idx ON albums(mb_release_id)",
+    "CREATE INDEX IF NOT EXISTS albums_mb_release_group_idx ON albums(mb_release_group_id)",
     "CREATE INDEX IF NOT EXISTS covers_source_idx ON covers(source_path)",
     "CREATE INDEX IF NOT EXISTS tracks_cover_idx  ON tracks(cover_id)",
 ];
@@ -264,6 +274,7 @@ impl LibraryDb {
     pub async fn artists(&self) -> Result<Vec<Artist>, LibraryError> {
         let rows = sqlx::query(
             "SELECT id, name, album_count, cover_id FROM artists \
+             WHERE album_count > 0 \
              ORDER BY name COLLATE NOCASE, id",
         )
         .fetch_all(&self.pool)
@@ -398,11 +409,13 @@ impl LibraryDb {
 
         for artist in &data.artists {
             sqlx::query(
-                "INSERT INTO artists (id, name, sort_name, album_count, cover_id) \
-                 VALUES (?, ?, NULL, ?, ?)",
+                "INSERT INTO artists (id, name, sort_name, mb_artist_id, album_count, cover_id) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
             )
+            .bind(&artist.id)
             .bind(&artist.name)
-            .bind(&artist.name)
+            .bind(artist.sort_name.as_deref())
+            .bind(artist.mb_artist_id.as_deref())
             .bind(artist.album_count)
             .bind(artist.cover.as_deref())
             .execute(&mut *tx)
@@ -428,13 +441,20 @@ impl LibraryDb {
         for album in &data.albums {
             sqlx::query(
                 "INSERT INTO albums \
-                 (id, name, artist_id, artist_name, song_count, duration_ms, cover_id) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 (id, name, artist_id, artist_name, album_sort_name, compilation, \
+                  mb_release_id, mb_release_group_id, disc_count, song_count, duration_ms, \
+                  cover_id) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&album.id)
             .bind(&album.name)
+            .bind(&album.artist_id)
             .bind(&album.artist)
-            .bind(&album.artist)
+            .bind(album.album_sort_name.as_deref())
+            .bind(if album.compilation { 1i64 } else { 0i64 })
+            .bind(album.mb_release_id.as_deref())
+            .bind(album.mb_release_group_id.as_deref())
+            .bind(album.disc_count.map(i64::from))
             .bind(album.song_count)
             .bind(album.duration.map(duration_ms))
             .bind(album.cover.as_deref())
@@ -451,7 +471,7 @@ impl LibraryDb {
             )
             .bind(&track.id)
             .bind(&track.title)
-            .bind(&track.artist)
+            .bind(&track.artist_id)
             .bind(&track.artist)
             .bind(&track.album_id)
             .bind(&track.album)

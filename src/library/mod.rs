@@ -10,6 +10,7 @@
 //! a query back down is pure string work with no guessing.
 
 pub mod db;
+mod identity;
 pub mod manager;
 pub mod offline;
 pub mod scan;
@@ -48,11 +49,13 @@ id_newtype!(
     TrackId
 );
 id_newtype!(
-    /// Opaque artist id. Offline: the artist name itself.
+    /// Opaque artist id. Offline: `mb:<uuid>`, `name:<normalized-name>`, or
+    /// the stable `various-artists` id for compilations.
     ArtistId
 );
 id_newtype!(
-    /// Opaque album id. Offline: `artist\u{0}album`.
+    /// Opaque album id. Offline: the identity key from the scan priority
+    /// chain (`mb-release:<uuid>`, `album-artist:…`, `folder:…`, …).
     AlbumId
 );
 id_newtype!(

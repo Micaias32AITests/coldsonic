@@ -11,14 +11,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lofty::prelude::{Accessor, AudioFile, TaggedFileExt};
+use lofty::tag::{ItemKey, Tag};
 use tracing::info;
 
 use crate::library::db::library::{CoverKind, FileStat, LibraryDb, ScanSignature};
+use crate::library::identity::{self, RawTrack, ResolvedAlbum, UNKNOWN_ALBUM, UNKNOWN_ARTIST};
 use crate::library::manager::{LibraryHandle, ScanOutcome, ScanPlan};
-use crate::library::{LibraryConfig, ScanMode, primary_artist};
-
-const UNKNOWN_ARTIST: &str = "Unknown Artist";
-const UNKNOWN_ALBUM: &str = "Unknown Album";
+use crate::library::{LibraryConfig, ScanMode};
 
 const AUDIO_EXTENSIONS: [&str; 6] = ["mp3", "flac", "ogg", "opus", "m4a", "wav"];
 
@@ -36,7 +35,10 @@ pub struct ScanData {
 
 #[derive(Debug, Clone)]
 pub struct ScanArtist {
+    pub id: String,
     pub name: String,
+    pub sort_name: Option<String>,
+    pub mb_artist_id: Option<String>,
     pub album_count: u32,
     pub cover: Option<String>,
 }
@@ -45,7 +47,14 @@ pub struct ScanArtist {
 pub struct ScanAlbum {
     pub id: String,
     pub name: String,
+    pub artist_id: String,
+    /// Display credit, kept whole (`"Alice & Bob"`, `"Various Artists"`, …).
     pub artist: String,
+    pub album_sort_name: Option<String>,
+    pub compilation: bool,
+    pub mb_release_id: Option<String>,
+    pub mb_release_group_id: Option<String>,
+    pub disc_count: Option<u32>,
     pub song_count: u32,
     pub duration: Option<Duration>,
     pub cover: Option<String>,
@@ -55,6 +64,8 @@ pub struct ScanAlbum {
 pub struct ScanTrack {
     pub id: String,
     pub title: String,
+    pub artist_id: String,
+    /// Full `ARTIST` credit, never collapsed to the primary artist.
     pub artist: String,
     pub album_id: String,
     pub album: String,
@@ -108,25 +119,15 @@ struct WalkedFile {
     kind: ScanKind,
 }
 
-/// A parsed audio file, before grouping.
+/// A parsed audio file: identity fields plus everything the scan needs to
+/// build rows and covers.
 struct FileMeta {
     rel: String,
-    title: String,
-    artist: String,
-    album: String,
-    track_no: Option<u32>,
+    raw: RawTrack,
     duration: Duration,
     mtime_ns: i64,
     size: i64,
     embedded_art: Option<(Vec<u8>, Option<String>)>,
-}
-
-/// One `(artist, album)` grouping; files keep scan (sorted) order inside it.
-struct AlbumGroup {
-    artist: String,
-    name: String,
-    tracks: Vec<FileMeta>,
-    cover: Option<CoverSource>,
 }
 
 #[derive(Clone)]
@@ -157,7 +158,7 @@ pub fn walk_and_tag(root: &Path, mode: ScanMode, never_split: &[String]) -> io::
 
     let covers_by_dir = folder_art_by_dir(&walked);
 
-    let mut files: Vec<ScanFile> = walked
+    let files: Vec<ScanFile> = walked
         .iter()
         .map(|file| ScanFile {
             path: file.rel.clone(),
@@ -167,73 +168,21 @@ pub fn walk_and_tag(root: &Path, mode: ScanMode, never_split: &[String]) -> io::
             track_id: None,
         })
         .collect();
-    let file_index: HashMap<String, usize> = files
-        .iter()
-        .enumerate()
-        .map(|(index, file)| (file.path.clone(), index))
-        .collect();
 
-    let mut groups: Vec<AlbumGroup> = Vec::new();
-    let mut index: HashMap<(String, String), usize> = HashMap::new();
-    let mut canonical: HashMap<String, String> = HashMap::new();
-
+    let mut metas: Vec<FileMeta> = Vec::new();
     for file in &walked {
         if file.kind != ScanKind::Audio {
             continue;
         }
-        let Some(mut meta) = read_file(&file.path, mode, root, never_split, file) else {
-            continue;
-        };
-        let display = canonical
-            .entry(meta.artist.to_lowercase())
-            .or_insert_with(|| meta.artist.clone())
-            .clone();
-        meta.artist = display;
-
-        let group_idx = match index.get(&(meta.artist.clone(), meta.album.clone())) {
-            Some(&idx) => idx,
-            None => {
-                let folder_art = match mode {
-                    ScanMode::Tags => None,
-                    ScanMode::Folders => file
-                        .path
-                        .parent()
-                        .map(|dir| rel_id(root, dir))
-                        .and_then(|dir| covers_by_dir.get(&dir).cloned()),
-                };
-                groups.push(AlbumGroup {
-                    artist: meta.artist.clone(),
-                    name: meta.album.clone(),
-                    tracks: Vec::new(),
-                    cover: folder_art,
-                });
-                index.insert((meta.artist.clone(), meta.album.clone()), groups.len() - 1);
-                groups.len() - 1
-            }
-        };
-
-        let group = &mut groups[group_idx];
-        if group.cover.is_none()
-            && let Some((bytes, mime)) = meta.embedded_art.take()
-        {
-            group.cover = Some(CoverSource {
-                id: meta.rel.clone(),
-                kind: CoverKind::Embedded,
-                source_path: meta.rel.clone(),
-                mime,
-                mtime_ns: meta.mtime_ns,
-                size: meta.size,
-                bytes: Some(bytes),
-            });
+        if let Some(meta) = read_file(&file.path, mode, root, file) {
+            metas.push(meta);
         }
-
-        if let Some(&index) = file_index.get(&meta.rel) {
-            files[index].track_id = Some(meta.rel.clone());
-        }
-        group.tracks.push(meta);
     }
 
-    Ok(build(groups, files))
+    let raw: Vec<RawTrack> = metas.iter().map(|meta| meta.raw.clone()).collect();
+    let albums = identity::resolve_albums(&raw, never_split);
+
+    Ok(build(albums, metas, files, mode, &covers_by_dir))
 }
 
 /// Result of the startup stat walk.
@@ -435,6 +384,12 @@ fn file_stem(path: &Path) -> String {
         .unwrap_or_default()
 }
 
+fn folder_of(rel: &str) -> String {
+    rel.rsplit_once('/')
+        .map(|(folder, _)| folder.to_string())
+        .unwrap_or_default()
+}
+
 fn mtime_ns(metadata: &std::fs::Metadata) -> i64 {
     metadata
         .modified()
@@ -445,13 +400,7 @@ fn mtime_ns(metadata: &std::fs::Metadata) -> i64 {
 }
 
 /// One lofty read per file: duration always, names/picture per mode.
-fn read_file(
-    path: &Path,
-    mode: ScanMode,
-    root: &Path,
-    never_split: &[String],
-    walked: &WalkedFile,
-) -> Option<FileMeta> {
+fn read_file(path: &Path, mode: ScanMode, root: &Path, walked: &WalkedFile) -> Option<FileMeta> {
     let tagged = match lofty::read_from_path(path) {
         Ok(tagged) => tagged,
         Err(err) => {
@@ -467,56 +416,96 @@ fn read_file(
             picture.mime_type().map(|mime| mime.to_string()),
         )
     });
-    let (title, artist, album, track_no) = match mode {
-        ScanMode::Tags => match tag {
-            Some(tag) => (
-                tag.title()
-                    .map(|s| s.into_owned())
-                    .unwrap_or_else(|| file_stem(path)),
-                tag.artist()
-                    .map(|s| primary_artist(&s, never_split))
-                    .unwrap_or_else(|| UNKNOWN_ARTIST.into()),
-                tag.album()
-                    .map(|s| s.into_owned())
-                    .unwrap_or_else(|| UNKNOWN_ALBUM.into()),
-                tag.track(),
-            ),
-            None => (
-                file_stem(path),
-                UNKNOWN_ARTIST.into(),
-                UNKNOWN_ALBUM.into(),
-                None,
-            ),
-        },
-        ScanMode::Folders => match rel_id(root, path).split('/').collect::<Vec<_>>().as_slice() {
-            [artist, album, file] => {
-                let (title, track_no) = split_track_prefix(&file_stem(Path::new(file)));
-                (
-                    title,
-                    artist.trim().to_string(),
-                    album.to_string(),
-                    track_no,
-                )
-            }
-            _ => (
-                file_stem(path),
-                UNKNOWN_ARTIST.into(),
-                UNKNOWN_ALBUM.into(),
-                None,
-            ),
-        },
+
+    let raw = match mode {
+        ScanMode::Tags => raw_from_tags(path, tag, &walked.rel),
+        ScanMode::Folders => raw_from_folders(path, root, tag, &walked.rel),
     };
+
     Some(FileMeta {
         rel: walked.rel.clone(),
-        title,
-        artist,
-        album,
-        track_no,
+        raw,
         duration,
         mtime_ns: walked.mtime_ns,
         size: walked.size,
         embedded_art,
     })
+}
+
+fn raw_from_tags(path: &Path, tag: Option<&Tag>, rel: &str) -> RawTrack {
+    let title = tag
+        .and_then(|tag| tag.title())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| file_stem(path));
+    let compilation = identity::parse_flag(tag_text(tag, ItemKey::FlagCompilation).as_deref());
+
+    RawTrack {
+        title,
+        album_title: tag_text(tag, ItemKey::AlbumTitle),
+        album_artist: tag_text(tag, ItemKey::AlbumArtist),
+        album_artist_sort: tag_text(tag, ItemKey::AlbumArtistSortOrder),
+        album_artist_mb_id: tag_text(tag, ItemKey::MusicBrainzReleaseArtistId),
+        artist_credit: tag
+            .and_then(|tag| tag.artist())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        artist_sort: tag_text(tag, ItemKey::TrackArtistSortOrder),
+        artist_mb_id: tag_text(tag, ItemKey::MusicBrainzArtistId),
+        compilation,
+        track_no: tag.and_then(|tag| tag.track()),
+        disc_no: tag.and_then(|tag| tag.disk()),
+        disc_total: tag.and_then(|tag| tag.disk_total()),
+        mb_release_id: tag_text(tag, ItemKey::MusicBrainzReleaseId),
+        mb_release_group_id: tag_text(tag, ItemKey::MusicBrainzReleaseGroupId),
+        folder: folder_of(rel),
+    }
+}
+
+fn raw_from_folders(path: &Path, root: &Path, tag: Option<&Tag>, rel: &str) -> RawTrack {
+    let (title, track_no, album, artist) =
+        match rel_id(root, path).split('/').collect::<Vec<_>>().as_slice() {
+            [artist, album, file] => {
+                let (title, track_no) = split_track_prefix(&file_stem(Path::new(file)));
+                (
+                    title,
+                    track_no,
+                    album.to_string(),
+                    artist.trim().to_string(),
+                )
+            }
+            _ => (
+                file_stem(path),
+                None,
+                UNKNOWN_ALBUM.to_string(),
+                UNKNOWN_ARTIST.to_string(),
+            ),
+        };
+
+    RawTrack {
+        title,
+        album_title: Some(album),
+        album_artist: Some(artist.clone()),
+        album_artist_sort: None,
+        album_artist_mb_id: None,
+        artist_credit: Some(artist),
+        artist_sort: None,
+        artist_mb_id: None,
+        compilation: false,
+        track_no: track_no.or_else(|| tag.and_then(|tag| tag.track())),
+        disc_no: None,
+        disc_total: None,
+        mb_release_id: None,
+        mb_release_group_id: None,
+        folder: folder_of(rel),
+    }
+}
+
+fn tag_text(tag: Option<&Tag>, key: ItemKey) -> Option<String> {
+    tag.and_then(|tag| tag.get_string(key))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 /// `"01 - Title"` → `("Title", Some(1))`; `"01 Title"` works too.
@@ -536,28 +525,38 @@ fn split_track_prefix(stem: &str) -> (String, Option<u32>) {
     (stem.to_string(), None)
 }
 
-fn build(groups: Vec<AlbumGroup>, files: Vec<ScanFile>) -> ScanData {
+fn build(
+    albums: Vec<ResolvedAlbum>,
+    metas: Vec<FileMeta>,
+    mut files: Vec<ScanFile>,
+    mode: ScanMode,
+    covers_by_dir: &HashMap<String, CoverSource>,
+) -> ScanData {
     let mut artists: Vec<ScanArtist> = Vec::new();
-    let mut albums: Vec<ScanAlbum> = Vec::new();
+    let mut artist_index: HashMap<String, usize> = HashMap::new();
+    let mut albums_out: Vec<ScanAlbum> = Vec::new();
     let mut tracks: Vec<ScanTrack> = Vec::new();
     let mut covers: Vec<ScanCover> = Vec::new();
 
-    for group in groups {
-        if !artists.iter().any(|a| a.name == group.artist) {
-            artists.push(ScanArtist {
-                name: group.artist.clone(),
-                album_count: 0,
-                cover: None,
-            });
-        }
-        let artist = artists
-            .iter_mut()
-            .find(|a| a.name == group.artist)
-            .expect("artist just inserted");
-        artist.album_count += 1;
+    let file_index: HashMap<String, usize> = files
+        .iter()
+        .enumerate()
+        .map(|(index, file)| (file.path.clone(), index))
+        .collect();
 
-        let duration: Duration = group.tracks.iter().map(|t| t.duration).sum();
-        if let Some(cover) = &group.cover {
+    for album in albums {
+        let album_artist_index = ensure_artist(
+            &mut artists,
+            &mut artist_index,
+            &album.artist_id,
+            &album.artist,
+            album.artist_sort_name.as_deref(),
+            album.artist_mb_id.as_deref(),
+        );
+        artists[album_artist_index].album_count += 1;
+
+        let cover = pick_cover(&album, &metas, mode, covers_by_dir);
+        if let Some(cover) = &cover {
             covers.push(ScanCover {
                 id: cover.id.clone(),
                 kind: cover.kind,
@@ -568,41 +567,139 @@ fn build(groups: Vec<AlbumGroup>, files: Vec<ScanFile>) -> ScanData {
                 bytes: cover.bytes.clone(),
             });
         }
-        let album_id = format!("{}\u{0}{}", group.artist, group.name);
-        albums.push(ScanAlbum {
-            id: album_id.clone(),
-            name: group.name.clone(),
-            artist: group.artist.clone(),
-            song_count: group.tracks.len() as u32,
+        let cover_id = cover.as_ref().map(|cover| cover.id.clone());
+
+        let duration: Duration = album
+            .tracks
+            .iter()
+            .map(|&index| metas[index].duration)
+            .sum();
+        albums_out.push(ScanAlbum {
+            id: album.id.clone(),
+            name: album.name.clone(),
+            artist_id: album.artist_id.clone(),
+            artist: album.artist.clone(),
+            album_sort_name: album.album_sort_name.clone(),
+            compilation: album.compilation,
+            mb_release_id: album.mb_release_id.clone(),
+            mb_release_group_id: album.mb_release_group_id.clone(),
+            disc_count: album.disc_count,
+            song_count: album.tracks.len() as u32,
             duration: Some(duration),
-            cover: group.cover.as_ref().map(|cover| cover.id.clone()),
+            cover: cover_id.clone(),
         });
-        for track in group.tracks {
+
+        for &index in &album.tracks {
+            let meta = &metas[index];
+            let (artist_id, artist) = match &meta.raw.artist_credit {
+                Some(credit) => (
+                    identity::artist_entity_id(credit, meta.raw.artist_mb_id.as_deref()),
+                    credit.clone(),
+                ),
+                None => (album.artist_id.clone(), album.artist.clone()),
+            };
+            ensure_artist(
+                &mut artists,
+                &mut artist_index,
+                &artist_id,
+                &artist,
+                meta.raw.artist_sort.as_deref(),
+                meta.raw.artist_mb_id.as_deref(),
+            );
+
+            if let Some(&file_index) = file_index.get(meta.rel.as_str()) {
+                files[file_index].track_id = Some(meta.rel.clone());
+            }
             tracks.push(ScanTrack {
-                id: track.rel,
-                title: track.title,
-                artist: track.artist,
-                album_id: album_id.clone(),
-                album: track.album,
-                track_no: track.track_no,
-                duration: track.duration,
-                cover: group.cover.as_ref().map(|cover| cover.id.clone()),
+                id: meta.rel.clone(),
+                title: meta.raw.title.clone(),
+                artist_id,
+                artist,
+                album_id: album.id.clone(),
+                album: album.name.clone(),
+                track_no: meta.raw.track_no,
+                duration: meta.duration,
+                cover: cover_id.clone(),
             });
         }
     }
 
     ScanData {
         artists,
-        albums,
+        albums: albums_out,
         tracks,
         covers,
         files,
     }
 }
 
+fn ensure_artist(
+    artists: &mut Vec<ScanArtist>,
+    index: &mut HashMap<String, usize>,
+    id: &str,
+    name: &str,
+    sort_name: Option<&str>,
+    mb_artist_id: Option<&str>,
+) -> usize {
+    if let Some(&existing) = index.get(id) {
+        return existing;
+    }
+    let position = artists.len();
+    artists.push(ScanArtist {
+        id: id.to_string(),
+        name: name.to_string(),
+        sort_name: sort_name
+            .map(str::to_string)
+            .or_else(|| Some(name.to_string())),
+        mb_artist_id: mb_artist_id.map(str::to_string),
+        album_count: 0,
+        cover: None,
+    });
+    index.insert(id.to_string(), position);
+    position
+}
+
+fn pick_cover(
+    album: &ResolvedAlbum,
+    metas: &[FileMeta],
+    mode: ScanMode,
+    covers_by_dir: &HashMap<String, CoverSource>,
+) -> Option<CoverSource> {
+    if mode == ScanMode::Folders {
+        let folder = album
+            .tracks
+            .first()
+            .map(|&index| folder_of(&metas[index].rel))
+            .unwrap_or_default();
+        if let Some(cover) = covers_by_dir.get(&folder) {
+            return Some(cover.clone());
+        }
+    }
+
+    album.tracks.iter().find_map(|&index| {
+        let meta = &metas[index];
+        meta.embedded_art.as_ref().map(|(bytes, mime)| CoverSource {
+            id: meta.rel.clone(),
+            kind: CoverKind::Embedded,
+            source_path: meta.rel.clone(),
+            mime: mime.clone(),
+            mtime_ns: meta.mtime_ns,
+            size: meta.size,
+            bytes: Some(bytes.clone()),
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::split_track_prefix;
+    use std::path::{Path, PathBuf};
+
+    use lofty::config::WriteOptions;
+    use lofty::prelude::Accessor;
+    use lofty::tag::{ItemKey, Tag, TagExt, TagType};
+
+    use super::*;
+    use crate::library::ScanMode;
 
     #[test]
     fn splits_dashed_track_prefix() {
@@ -643,5 +740,89 @@ mod tests {
         assert_eq!(split_track_prefix("01"), ("01".into(), None));
         assert_eq!(split_track_prefix("My - Song"), ("My - Song".into(), None));
         assert_eq!(split_track_prefix("- Title"), ("- Title".into(), None));
+    }
+
+    /// Write a tiny valid PCM WAV so lofty can attach an ID3v2 tag.
+    fn write_wav(path: &Path) {
+        let data_len: u32 = 8;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // mono
+        bytes.extend_from_slice(&8000u32.to_le_bytes()); // sample rate
+        bytes.extend_from_slice(&16000u32.to_le_bytes()); // byte rate
+        bytes.extend_from_slice(&2u16.to_le_bytes()); // block align
+        bytes.extend_from_slice(&16u16.to_le_bytes()); // bits
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 8]);
+        std::fs::write(path, bytes).expect("write wav");
+    }
+
+    fn save_tag(path: &Path, build: impl FnOnce(&mut Tag)) {
+        let mut tag = Tag::new(TagType::Id3v2);
+        build(&mut tag);
+        tag.save_to_path(path, WriteOptions::default())
+            .expect("save tag");
+    }
+
+    #[test]
+    fn fixture_scan_groups_compilation_tracks_into_one_album() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("Hits")).expect("mkdir");
+
+        let first = root.join("Hits").join("01 - One.wav");
+        write_wav(&first);
+        save_tag(&first, |tag| {
+            tag.set_title("One".into());
+            tag.set_artist("Alice".into());
+            tag.set_album("Hits".into());
+            tag.set_track(1);
+            tag.insert_text(ItemKey::FlagCompilation, "1".into());
+        });
+
+        let second = root.join("Hits").join("02 - Two.wav");
+        write_wav(&second);
+        save_tag(&second, |tag| {
+            tag.set_title("Two".into());
+            tag.set_artist("Bob".into());
+            tag.set_album("Hits".into());
+            tag.set_track(2);
+            tag.insert_text(ItemKey::FlagCompilation, "1".into());
+        });
+
+        let data = walk_and_tag(root, ScanMode::Tags, &[]).expect("scan");
+        assert_eq!(data.albums.len(), 1);
+        assert_eq!(data.albums[0].artist, identity::VARIOUS_ARTISTS);
+        assert!(data.albums[0].compilation);
+        assert_eq!(data.tracks.len(), 2);
+        assert_eq!(data.tracks[0].artist, "Alice");
+        assert_eq!(data.tracks[1].artist, "Bob");
+        assert!(data.artists.iter().any(|artist| {
+            artist.id == identity::VARIOUS_ARTISTS_ID && artist.album_count == 1
+        }));
+    }
+
+    #[test]
+    fn fixture_scan_preserves_full_track_credit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let path = PathBuf::from(root).join("Song.wav");
+        write_wav(&path);
+        save_tag(&path, |tag| {
+            tag.set_title("Song".into());
+            tag.set_artist("Alice feat. Bob".into());
+            tag.set_album("Show".into());
+        });
+
+        let data = walk_and_tag(root, ScanMode::Tags, &[]).expect("scan");
+        assert_eq!(data.tracks.len(), 1);
+        assert_eq!(data.tracks[0].artist, "Alice feat. Bob");
+        assert_eq!(data.albums[0].artist, "Alice");
     }
 }

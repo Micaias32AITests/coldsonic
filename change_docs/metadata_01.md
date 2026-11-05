@@ -1,6 +1,6 @@
 # Metadata 01 — album identity, artist entities, and scan priority
 
-Status: planned.
+Status: Phase 1 implemented; Phases 2–3 planned.
 
 Applies to: `src/library/scan.rs`, `src/library/mod.rs`,
 `src/library/db/library.rs`, `src/library/offline/mod.rs`,
@@ -570,6 +570,16 @@ verifies the resulting `ScanData` rows.
 - Infer Various Artists when required.
 - Keep one album-artist association per album for now.
 - Bump schema/scanner versions and rescan.
+
+Phase 1 implementation notes:
+
+- The pure resolver lives in `src/library/identity.rs`.
+- Until `album_artists` exists, `albums.artist_id` is the single
+  album-artist association. The Artists screen filters on
+  `artists.album_count > 0`, so track-only artists stay in the table for
+  foreign keys but do not appear as top-level entries.
+- `tracks.disc_no` and disc-aware ordering are deferred to Phase 2; Phase 1
+  still reads disc tags to compute `albums.disc_count`.
 
 ### Phase 2 — multiple album artists and discs
 

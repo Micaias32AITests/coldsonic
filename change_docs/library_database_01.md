@@ -325,8 +325,16 @@ CREATE TABLE tracks (
     album_id    TEXT REFERENCES albums(id) ON DELETE SET NULL,
     album_name  TEXT,
     track_no    INTEGER,
+    disc_no     INTEGER,
     duration_ms INTEGER NOT NULL,
     cover_id    TEXT REFERENCES covers(id) ON DELETE SET NULL
+);
+
+CREATE TABLE album_artists (
+    album_id  TEXT NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+    artist_id TEXT NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+    position  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (album_id, artist_id)
 );
 
 CREATE TABLE files (
@@ -346,6 +354,7 @@ CREATE INDEX tracks_title_idx  ON tracks(title);
 CREATE INDEX tracks_album_idx  ON tracks(album_id);
 CREATE INDEX tracks_artist_idx ON tracks(artist_id);
 CREATE INDEX artists_mb_idx    ON artists(mb_artist_id);
+CREATE INDEX album_artists_artist_idx ON album_artists(artist_id);
 CREATE INDEX files_track_idx   ON files(track_id);
 ```
 
@@ -359,8 +368,10 @@ Notes:
   directory (folder art) or audio file path (embedded art).
 - `artists()` lists artists with `album_count > 0` (album artists only);
   track-only artists stay in the table so `tracks.artist_id` remains valid.
-- Phase 1 of the metadata plan stores one album artist per album via
-  `albums.artist_id`. `album_artists` and `tracks.disc_no` arrive in Phase 2.
+- `album_artists` is the source of truth for Artists-screen membership,
+  `album_count`, and artist-detail albums. `albums.artist_id` remains the
+  primary album artist for compatibility.
+- Album tracks are ordered by `disc_no`, then `track_no`.
 - Audio whitelist (shared with the scanner):
   `mp3`, `flac`, `ogg`, `opus`, `m4a`, `wav`.
 - Folder-art whitelist (case-insensitive):

@@ -26,6 +26,9 @@ const ROW_HEIGHT: f32 = 56.0;
 pub struct State {
     id: AlbumId,
     load: LoadState<AlbumDetail>,
+    /// Flattened track list with multi-disc headers, stored so the lazy list
+    /// can borrow it for the lifetime of the view.
+    rows: Vec<AlbumRow>,
     cover: CoverState,
     revision: u64,
     dirty: bool,
@@ -64,6 +67,7 @@ pub fn init(id: AlbumId, handle: ManagerHandle, revision: u64) -> (State, Task<M
         State {
             id,
             load: LoadState::Loading,
+            rows: Vec::new(),
             cover: CoverState::NotLoaded,
             revision,
             dirty: false,
@@ -99,6 +103,10 @@ pub fn update(state: &mut State, manager: &Manager, msg: Msg) -> Action<Msg, Eve
             }
             state.dirty = false;
             state.load = super::load_state::load_state(result);
+            state.rows = match &state.load {
+                LoadState::Loaded(detail) => album_rows(detail),
+                _ => Vec::new(),
+            };
             match &state.load {
                 LoadState::Loaded(detail) => {
                     let cover = detail.album.cover.clone();
@@ -165,6 +173,12 @@ pub fn view(state: &State) -> Element<'_, Msg> {
     if !artist.is_empty() {
         parts.push(artist.to_string());
     }
+    if detail.album.compilation {
+        parts.push("Compilation".to_string());
+    }
+    if let Some(disc_count) = detail.album.disc_count.filter(|count| *count > 1) {
+        parts.push(format!("{disc_count} discs"));
+    }
     parts.push(format!("{} songs", detail.songs.len()));
     parts.push(fmt_duration(total));
     let metadata = parts.join(" · ");
@@ -189,8 +203,11 @@ pub fn view(state: &State) -> Element<'_, Msg> {
     let body: Element<'_, Msg> = if detail.songs.is_empty() {
         centered_muted("No songs")
     } else {
-        let list = lazy_list(&detail.songs, ROW_HEIGHT, |_index, row: &Track| {
-            track_row(row)
+        let rows = &state.rows;
+        let songs = &detail.songs;
+        let list = lazy_list(rows, ROW_HEIGHT, |_index, row: &AlbumRow| match row {
+            AlbumRow::Disc(number) => disc_header(*number),
+            AlbumRow::Track(index) => track_row(&songs[*index]),
         })
         .width(Fill)
         .height(Fill);
@@ -205,6 +222,44 @@ pub fn view(state: &State) -> Element<'_, Msg> {
         .width(Fill)
         .height(Fill)
         .into()
+}
+
+/// One row in the album track list. Multi-disc albums interleave headers.
+#[derive(Debug, Clone)]
+enum AlbumRow {
+    Disc(u32),
+    /// Index into `AlbumDetail::songs`.
+    Track(usize),
+}
+
+fn album_rows(detail: &AlbumDetail) -> Vec<AlbumRow> {
+    let multi_disc = detail.album.disc_count.unwrap_or(1) > 1;
+    let mut rows = Vec::with_capacity(detail.songs.len() + 4);
+    let mut current_disc = None;
+    for (index, track) in detail.songs.iter().enumerate() {
+        if multi_disc {
+            let disc = track.disc_no.unwrap_or(1);
+            if current_disc != Some(disc) {
+                rows.push(AlbumRow::Disc(disc));
+                current_disc = Some(disc);
+            }
+        }
+        rows.push(AlbumRow::Track(index));
+    }
+    rows
+}
+
+fn disc_header(number: u32) -> Element<'static, Msg> {
+    container(
+        text(format!("Disc {number}"))
+            .size(12)
+            .color([0.7, 0.7, 0.7]),
+    )
+    .padding(Padding::from([0, 8]))
+    .height(ROW_HEIGHT)
+    .align_y(Center)
+    .width(Fill)
+    .into()
 }
 
 fn track_header() -> Element<'static, Msg> {

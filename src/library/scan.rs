@@ -39,8 +39,15 @@ pub struct ScanArtist {
     pub name: String,
     pub sort_name: Option<String>,
     pub mb_artist_id: Option<String>,
-    pub album_count: u32,
     pub cover: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanAlbumArtist {
+    pub id: String,
+    pub name: String,
+    pub sort_name: Option<String>,
+    pub mb_artist_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +57,8 @@ pub struct ScanAlbum {
     pub artist_id: String,
     /// Display credit, kept whole (`"Alice & Bob"`, `"Various Artists"`, …).
     pub artist: String,
+    /// Every album artist, in display order. Drives the `album_artists` table.
+    pub album_artists: Vec<ScanAlbumArtist>,
     pub album_sort_name: Option<String>,
     pub compilation: bool,
     pub mb_release_id: Option<String>,
@@ -70,6 +79,7 @@ pub struct ScanTrack {
     pub album_id: String,
     pub album: String,
     pub track_no: Option<u32>,
+    pub disc_no: Option<u32>,
     pub duration: Duration,
     pub cover: Option<String>,
 }
@@ -444,7 +454,9 @@ fn raw_from_tags(path: &Path, tag: Option<&Tag>, rel: &str) -> RawTrack {
         title,
         album_title: tag_text(tag, ItemKey::AlbumTitle),
         album_artist: tag_text(tag, ItemKey::AlbumArtist),
+        album_artists: tag_texts(tag, ItemKey::AlbumArtists),
         album_artist_sort: tag_text(tag, ItemKey::AlbumArtistSortOrder),
+        album_artist_mb_ids: tag_texts(tag, ItemKey::MusicBrainzReleaseArtistId),
         album_artist_mb_id: tag_text(tag, ItemKey::MusicBrainzReleaseArtistId),
         artist_credit: tag
             .and_then(|tag| tag.artist())
@@ -486,7 +498,9 @@ fn raw_from_folders(path: &Path, root: &Path, tag: Option<&Tag>, rel: &str) -> R
         title,
         album_title: Some(album),
         album_artist: Some(artist.clone()),
+        album_artists: Vec::new(),
         album_artist_sort: None,
+        album_artist_mb_ids: Vec::new(),
         album_artist_mb_id: None,
         artist_credit: Some(artist),
         artist_sort: None,
@@ -506,6 +520,18 @@ fn tag_text(tag: Option<&Tag>, key: ItemKey) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+/// Every value for a multi-value item key, trimmed and with empties removed.
+fn tag_texts(tag: Option<&Tag>, key: ItemKey) -> Vec<String> {
+    tag.map(|tag| {
+        tag.get_strings(key)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// `"01 - Title"` → `("Title", Some(1))`; `"01 Title"` works too.
@@ -545,7 +571,26 @@ fn build(
         .collect();
 
     for album in albums {
-        let album_artist_index = ensure_artist(
+        // Register every album artist; the primary artist is also
+        // `albums.artist_id` for compatibility.
+        let mut album_artists_out: Vec<ScanAlbumArtist> = Vec::new();
+        for artist in &album.album_artists {
+            ensure_artist(
+                &mut artists,
+                &mut artist_index,
+                &artist.id,
+                &artist.name,
+                artist.sort_name.as_deref(),
+                artist.mb_id.as_deref(),
+            );
+            album_artists_out.push(ScanAlbumArtist {
+                id: artist.id.clone(),
+                name: artist.name.clone(),
+                sort_name: artist.sort_name.clone(),
+                mb_artist_id: artist.mb_id.clone(),
+            });
+        }
+        let _ = ensure_artist(
             &mut artists,
             &mut artist_index,
             &album.artist_id,
@@ -553,7 +598,6 @@ fn build(
             album.artist_sort_name.as_deref(),
             album.artist_mb_id.as_deref(),
         );
-        artists[album_artist_index].album_count += 1;
 
         let cover = pick_cover(&album, &metas, mode, covers_by_dir);
         if let Some(cover) = &cover {
@@ -579,6 +623,7 @@ fn build(
             name: album.name.clone(),
             artist_id: album.artist_id.clone(),
             artist: album.artist.clone(),
+            album_artists: album_artists_out,
             album_sort_name: album.album_sort_name.clone(),
             compilation: album.compilation,
             mb_release_id: album.mb_release_id.clone(),
@@ -618,6 +663,7 @@ fn build(
                 album_id: album.id.clone(),
                 album: album.name.clone(),
                 track_no: meta.raw.track_no,
+                disc_no: meta.raw.disc_no,
                 duration: meta.duration,
                 cover: cover_id.clone(),
             });
@@ -652,7 +698,6 @@ fn ensure_artist(
             .map(str::to_string)
             .or_else(|| Some(name.to_string())),
         mb_artist_id: mb_artist_id.map(str::to_string),
-        album_count: 0,
         cover: None,
     });
     index.insert(id.to_string(), position);
@@ -803,9 +848,16 @@ mod tests {
         assert_eq!(data.tracks.len(), 2);
         assert_eq!(data.tracks[0].artist, "Alice");
         assert_eq!(data.tracks[1].artist, "Bob");
-        assert!(data.artists.iter().any(|artist| {
-            artist.id == identity::VARIOUS_ARTISTS_ID && artist.album_count == 1
-        }));
+        assert!(
+            data.artists
+                .iter()
+                .any(|artist| { artist.id == identity::VARIOUS_ARTISTS_ID })
+        );
+        assert_eq!(data.albums[0].album_artists.len(), 1);
+        assert_eq!(
+            data.albums[0].album_artists[0].id,
+            identity::VARIOUS_ARTISTS_ID
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Metadata 01 — album identity, artist entities, and scan priority
 
-Status: Phase 1 implemented; Phases 2–3 planned.
+Status: Phases 1–3 implemented.
 
 Applies to: `src/library/scan.rs`, `src/library/mod.rs`,
 `src/library/db/library.rs`, `src/library/offline/mod.rs`,
@@ -589,6 +589,20 @@ Phase 1 implementation notes:
 - Order album tracks by disc then track.
 - Expose multiple album artists through `ArtistDetail`.
 
+Phase 2 implementation notes:
+
+- `MUSICBRAINZ_ALBUMARTISTID` is read as a multi-value list and matched to
+  `ALBUMARTISTS` by position. Missing ids fall back to `name:<normalized>`.
+- Identity key for multi-value credits sorts the normalized names and joins
+  them with `\u{1f}` so track order does not split an album; the display
+  credit joins the literal spellings with `" & "`.
+- `album_artists` is the source of truth for Artists-screen membership,
+  `album_count`, and artist-detail albums. `albums.artist_id` is retained as
+  the primary artist for compatibility.
+- `tracks.disc_no` is stored and album detail orders by
+  `disc_no`, then `track_no`.
+- Schema/scanner versions are `3`.
+
 ### Phase 3 — UI and polish
 
 - Show the compilation badge / Various Artists collection.
@@ -596,6 +610,13 @@ Phase 1 implementation notes:
 - Show full track artist credits consistently.
 - Optionally add structured `ARTISTS` support for future featured-artist
   pages and search.
+
+Phase 3 implementation notes:
+
+- Album detail adds `"Compilation"` and the disc count to the header metadata.
+- Multi-disc albums interleave fixed-height `Disc N` header rows in the same
+  lazy list as the tracks, so virtualization keeps working.
+- Track rows keep displaying the full `ARTIST` credit stored on the track.
 
 ## 12. Out of scope
 

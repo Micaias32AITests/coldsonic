@@ -72,6 +72,8 @@ pub struct Track {
     pub artist: Option<String>,
     pub album: Option<String>,
     pub track_no: Option<u32>,
+    #[serde(default)]
+    pub disc_no: Option<u32>,
     pub duration: Duration,
     pub cover: Option<CoverId>,
 }
@@ -102,6 +104,10 @@ pub struct Album {
     pub name: String,
     pub artist: Option<String>,
     pub song_count: u32,
+    #[serde(default)]
+    pub disc_count: Option<u32>,
+    #[serde(default)]
+    pub compilation: bool,
     pub duration: Option<Duration>,
     pub cover: Option<CoverId>,
 }

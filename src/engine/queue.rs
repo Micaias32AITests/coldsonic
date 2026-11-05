@@ -173,6 +173,7 @@ mod tests {
             artist: None,
             album: None,
             track_no: None,
+            disc_no: None,
             duration: Duration::from_secs(60),
             cover: None,
         }

@@ -33,7 +33,12 @@ pub(crate) struct RawTrack {
     pub album_title: Option<String>,
     /// Literal `ALBUMARTIST` credit, kept whole.
     pub album_artist: Option<String>,
+    /// Multi-value `ALBUMARTISTS` entries. Empty when only `ALBUMARTIST` is set.
+    pub album_artists: Vec<String>,
     pub album_artist_sort: Option<String>,
+    /// Multi-value `MUSICBRAINZ_ALBUMARTISTID` values, positionally matched to
+    /// `album_artists` when possible.
+    pub album_artist_mb_ids: Vec<String>,
     pub album_artist_mb_id: Option<String>,
     /// Literal `ARTIST` credit, kept whole for display.
     pub artist_credit: Option<String>,
@@ -49,6 +54,15 @@ pub(crate) struct RawTrack {
     pub folder: String,
 }
 
+/// One artist entity credited on an album.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedArtist {
+    pub id: String,
+    pub name: String,
+    pub sort_name: Option<String>,
+    pub mb_id: Option<String>,
+}
+
 /// The album a candidate set resolved to.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedAlbum {
@@ -58,6 +72,8 @@ pub(crate) struct ResolvedAlbum {
     pub artist: String,
     pub artist_sort_name: Option<String>,
     pub artist_mb_id: Option<String>,
+    /// Every album artist entity, in display order. Always at least one.
+    pub album_artists: Vec<ResolvedArtist>,
     pub album_sort_name: Option<String>,
     pub compilation: bool,
     pub mb_release_id: Option<String>,
@@ -136,7 +152,7 @@ pub(crate) fn resolve_albums(tracks: &[RawTrack], never_split: &[String]) -> Vec
         if group_of[index].is_some() {
             continue;
         }
-        let Some(artist) = normalized(track.album_artist.as_deref().unwrap_or("")) else {
+        let Some(artist) = album_artist_key(track) else {
             continue;
         };
         assign(
@@ -203,11 +219,20 @@ fn resolve_group(tracks: &[RawTrack], members: &[usize], never_split: &[String])
     let release_group_id = single_normalized_uuid(members, tracks, |track| {
         track.mb_release_group_id.as_deref()
     });
-    let album_artist_names = single_values(members, tracks, |track| track.album_artist.as_deref());
-    // Display spelling: keep the first literal credit, not the normalized key.
-    let album_artist = members
+    let mut album_artist_keys: Vec<String> = Vec::new();
+    for &member in members {
+        if let Some(key) = album_artist_key(&tracks[member])
+            && !album_artist_keys.contains(&key)
+        {
+            album_artist_keys.push(key);
+        }
+    }
+    // Display spelling: keep the literal ALBUMARTIST credit, otherwise join
+    // the multi-value ALBUMARTISTS entries.
+    let explicit_album_artist = members
         .iter()
         .find_map(|&member| clean(tracks[member].album_artist.as_deref()));
+    let multi_album_artists = collect_multi_album_artists(members, tracks);
 
     let primary_artists = {
         let mut values: Vec<String> = Vec::new();
@@ -232,9 +257,9 @@ fn resolve_group(tracks: &[RawTrack], members: &[usize], never_split: &[String])
         Kind::MbRelease(id)
     } else if let Some(id) = release_group_id.clone() {
         Kind::MbReleaseGroup(id)
-    } else if album_artist_names.len() == 1 {
+    } else if album_artist_keys.len() == 1 {
         Kind::AlbumArtist {
-            normalized: album_artist_names[0].clone(),
+            normalized: album_artist_keys[0].clone(),
         }
     } else if primary_artists.len() == 1 {
         Kind::Artist {
@@ -250,26 +275,28 @@ fn resolve_group(tracks: &[RawTrack], members: &[usize], never_split: &[String])
         Kind::Unknown
     };
 
-    let explicit_album_artist = matches!(kind, Kind::AlbumArtist { .. });
-    let display_artist = match &kind {
-        Kind::AlbumArtist { .. } => album_artist
-            .clone()
-            .unwrap_or_else(|| UNKNOWN_ARTIST.into()),
-        Kind::Artist { .. } => {
-            // Recover the display spelling from the first matching credit.
-            members
-                .iter()
-                .find_map(|&member| {
-                    let credit = tracks[member].artist_credit.as_deref()?;
-                    let primary = primary_artist(credit, never_split);
-                    normalized(&primary)
-                        .filter(|value| Some(value) == primary_artists.first())
-                        .map(|_| primary)
-                })
-                .unwrap_or_else(|| UNKNOWN_ARTIST.into())
-        }
-        Kind::Various => VARIOUS_ARTISTS.into(),
-        _ => UNKNOWN_ARTIST.into(),
+    let primary_display = members.iter().find_map(|&member| {
+        let credit = tracks[member].artist_credit.as_deref()?;
+        let primary = primary_artist(credit, never_split);
+        normalized(&primary)
+            .filter(|value| Some(value) == primary_artists.first())
+            .map(|_| primary)
+    });
+    let multi_display = multi_album_artists
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>()
+        .join(" & ");
+    let display_artist = if let Some(credit) = explicit_album_artist.clone() {
+        credit
+    } else if matches!(kind, Kind::Various) {
+        VARIOUS_ARTISTS.into()
+    } else if !multi_display.is_empty() {
+        multi_display
+    } else if let Some(primary) = primary_display.clone() {
+        primary
+    } else {
+        UNKNOWN_ARTIST.into()
     };
 
     let id = match &kind {
@@ -305,29 +332,58 @@ fn resolve_group(tracks: &[RawTrack], members: &[usize], never_split: &[String])
             .iter()
             .find_map(|&member| normalized_uuid(tracks[member].artist_mb_id.as_deref())),
     };
-    let (artist_id, artist) = match &kind {
-        Kind::Various => (VARIOUS_ARTISTS_ID.to_string(), VARIOUS_ARTISTS.to_string()),
-        Kind::Unknown => (
-            artist_entity_id(UNKNOWN_ARTIST, None),
-            UNKNOWN_ARTIST.into(),
-        ),
-        _ => (
-            artist_entity_id(&display_artist, artist_mb_id.as_deref()),
-            display_artist.clone(),
-        ),
-    };
+    let sort_credit = members
+        .iter()
+        .find_map(|&member| tracks[member].album_artist_sort.clone());
 
-    let artist_sort_name = if explicit_album_artist {
-        members
-            .iter()
-            .find_map(|&member| tracks[member].album_artist_sort.clone())
-            .or_else(|| Some(display_artist.clone()))
+    let album_artists: Vec<ResolvedArtist> = if !multi_album_artists.is_empty() {
+        multi_album_artists
+            .into_iter()
+            .map(|(name, mb_id)| ResolvedArtist {
+                id: artist_entity_id(&name, mb_id.as_deref()),
+                sort_name: Some(name.clone()),
+                name,
+                mb_id,
+            })
+            .collect()
     } else {
-        Some(display_artist.clone())
+        let (id, name, mb_id) = match &kind {
+            Kind::Various => (
+                VARIOUS_ARTISTS_ID.to_string(),
+                VARIOUS_ARTISTS.to_string(),
+                None,
+            ),
+            Kind::Unknown => (
+                artist_entity_id(UNKNOWN_ARTIST, None),
+                UNKNOWN_ARTIST.to_string(),
+                None,
+            ),
+            _ => (
+                artist_entity_id(&display_artist, artist_mb_id.as_deref()),
+                display_artist.clone(),
+                artist_mb_id.clone(),
+            ),
+        };
+        vec![ResolvedArtist {
+            id,
+            sort_name: sort_credit.clone().or_else(|| Some(name.clone())),
+            name,
+            mb_id,
+        }]
     };
-    let album_sort_name = artist_sort_name.clone();
 
-    let compilation = matches!(kind, Kind::Various) || (any_compilation && !explicit_album_artist);
+    let primary = album_artists
+        .first()
+        .cloned()
+        .expect("every album has at least one artist entity");
+    let artist_id = primary.id;
+    let artist = display_artist;
+    let artist_sort_name = primary.sort_name;
+    let artist_mb_id = primary.mb_id;
+    let album_sort_name = sort_credit.or_else(|| Some(artist.clone()));
+
+    let compilation =
+        matches!(kind, Kind::Various) || (any_compilation && explicit_album_artist.is_none());
 
     let name = display_title(members, tracks);
 
@@ -348,6 +404,7 @@ fn resolve_group(tracks: &[RawTrack], members: &[usize], never_split: &[String])
         artist,
         artist_sort_name,
         artist_mb_id,
+        album_artists,
         album_sort_name,
         compilation,
         mb_release_id: release_id,
@@ -412,31 +469,63 @@ fn folder_key(folder: &str) -> String {
     folder.trim_matches('/').to_string()
 }
 
+/// The comparison key for a track's album-artist credit. A literal
+/// `ALBUMARTIST` wins; otherwise the multi-value `ALBUMARTISTS` entries are
+/// sorted and joined so track order does not affect grouping.
+fn album_artist_key(track: &RawTrack) -> Option<String> {
+    if let Some(single) = normalized(track.album_artist.as_deref().unwrap_or("")) {
+        return Some(single);
+    }
+    let mut values: Vec<String> = track
+        .album_artists
+        .iter()
+        .filter_map(|name| normalized(name))
+        .collect();
+    values.sort();
+    values.dedup();
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.join("\u{1f}"))
+    }
+}
+
 fn album_artist_compatible(left: &RawTrack, right: &RawTrack) -> bool {
-    match (
-        normalized(left.album_artist.as_deref().unwrap_or("")),
-        normalized(right.album_artist.as_deref().unwrap_or("")),
-    ) {
+    match (album_artist_key(left), album_artist_key(right)) {
         (Some(left), Some(right)) => left == right,
         _ => true,
     }
 }
 
-/// All distinct normalized values that are present, preserving display order.
-fn single_values(
+/// Distinct multi-value album artists across the candidate, preserving the
+/// first spelling and matching `MUSICBRAINZ_ALBUMARTISTID` values by position.
+fn collect_multi_album_artists(
     members: &[usize],
     tracks: &[RawTrack],
-    value: impl Fn(&RawTrack) -> Option<&str>,
-) -> Vec<String> {
-    let mut values: Vec<String> = Vec::new();
+) -> Vec<(String, Option<String>)> {
+    let mut out: Vec<(String, Option<String>)> = Vec::new();
     for &member in members {
-        if let Some(normalized) = normalized(value(&tracks[member]).unwrap_or(""))
-            && !values.iter().any(|existing| existing == &normalized)
-        {
-            values.push(normalized);
+        let track = &tracks[member];
+        for (index, value) in track.album_artists.iter().enumerate() {
+            let Some(name) = clean(Some(value)) else {
+                continue;
+            };
+            let Some(normalized_name) = normalized(&name) else {
+                continue;
+            };
+            if out.iter().any(|(existing, _)| {
+                normalized(existing).as_deref() == Some(normalized_name.as_str())
+            }) {
+                continue;
+            }
+            let mb_id = track
+                .album_artist_mb_ids
+                .get(index)
+                .and_then(|value| normalized_uuid(Some(value)));
+            out.push((name, mb_id));
         }
     }
-    values
+    out
 }
 
 fn single_normalized_uuid(
@@ -680,5 +769,47 @@ mod tests {
         b.disc_no = Some(2);
         let albums = resolve_albums(&[a, b], &[]);
         assert_eq!(albums[0].disc_count, Some(2));
+    }
+
+    #[test]
+    fn multiple_album_artists_group_and_keep_entities() {
+        let mut a = track("Alice", "Duets");
+        a.album_artists = vec!["Alice".into(), "Bob".into()];
+        let mut b = track("Bob", "Duets");
+        b.album_artists = vec!["Alice".into(), "Bob".into()];
+        let albums = resolve_albums(&[a, b], &[]);
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].artist, "Alice & Bob");
+        let ids: Vec<&str> = albums[0]
+            .album_artists
+            .iter()
+            .map(|artist| artist.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["name:alice", "name:bob"]);
+    }
+
+    #[test]
+    fn multiple_album_artists_use_musicbrainz_ids() {
+        let mut a = track("Alice", "Duets");
+        a.album_artists = vec!["Alice".into(), "Bob".into()];
+        a.album_artist_mb_ids = vec!["AAAA".into(), "BBBB".into()];
+        let albums = resolve_albums(&[a], &[]);
+        let ids: Vec<&str> = albums[0]
+            .album_artists
+            .iter()
+            .map(|artist| artist.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["mb:aaaa", "mb:bbbb"]);
+    }
+
+    #[test]
+    fn album_artist_entities_are_not_track_artists() {
+        let mut a = track("Carol feat. Dave", "Album");
+        a.album_artist = Some("Carol".into());
+        let albums = resolve_albums(&[a], &[]);
+        assert_eq!(albums[0].album_artists.len(), 1);
+        assert_eq!(albums[0].album_artists[0].name, "Carol");
+        // The full track credit is still preserved on the raw track.
+        assert_eq!(albums[0].tracks.len(), 1);
     }
 }

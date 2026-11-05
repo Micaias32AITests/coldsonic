@@ -28,6 +28,8 @@ pub use iced::widget::scrollable::Viewport;
 const INITIAL_ROWS: usize = 32;
 /// Extra rows built above and below the visible area by default.
 pub const DEFAULT_OVERSCAN: usize = 3;
+/// Gap between the right edge of the content and the scrollbar.
+const SCROLLBAR_SPACING: f32 = 5.0;
 
 /// Which item indices are visible (plus overscan) for a scroll viewport.
 ///
@@ -137,7 +139,7 @@ where
         Self {
             scrollable: Scrollable::with_direction(
                 Element::new(rows),
-                Direction::Vertical(scrollable::Scrollbar::default()),
+                Direction::Vertical(scrollable::Scrollbar::default().spacing(SCROLLBAR_SPACING)),
             ),
         }
     }

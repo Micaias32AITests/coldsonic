@@ -12,6 +12,7 @@ use iced_fonts::lucide;
 use crate::library::{Album, AlbumId, CoverId, Manager, ManagerHandle};
 use crate::prelude::*;
 use crate::widget::lazy_list::{lazy_list, visible_range};
+use crate::widget::text_button::text_button;
 
 use super::covers::{CoverMap, CoverState};
 use super::load_state::LoadState;
@@ -173,7 +174,7 @@ fn header() -> Element<'static, Msg> {
 fn album_row<'a>(covers: &'a CoverMap, album: &'a Album) -> Element<'a, Msg> {
     widget::row![
         cover_cell(covers, album.cover.clone()),
-        button(
+        text_button(
             text(&album.name)
                 .size(14)
                 .wrapping(iced::widget::text::Wrapping::None)

@@ -761,6 +761,7 @@ impl MainScreen {
             pane_grid::Content::new(content)
         })
         .on_resize(6.0, Msg::PaneResized)
+        .spacing(5)
         .width(Fill)
         .height(Fill);
 
@@ -1063,9 +1064,10 @@ impl MainScreen {
     }
 
     fn view_stack<'a>(&'a self) -> Element<'a, Msg> {
-        stack(&self.entries, |entry: &'a ScreenEntry| {
+        container(stack(&self.entries, |entry: &'a ScreenEntry| {
             self.view_route(entry)
-        })
+        }))
+        .padding(5)
         .into()
     }
 

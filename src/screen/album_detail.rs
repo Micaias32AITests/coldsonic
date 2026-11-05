@@ -11,6 +11,7 @@ use iced_fonts::lucide;
 use crate::library::{AlbumDetail, AlbumId, CoverId, Manager, ManagerHandle, Track};
 use crate::prelude::*;
 use crate::widget::lazy_list::lazy_list;
+use crate::widget::text_button::text_button;
 
 use super::fmt_duration;
 use super::load_state::{LoadError, LoadState};
@@ -233,7 +234,7 @@ fn track_row<'a>(row: &'a Track) -> Element<'a, Msg> {
         text(row.track_no.map(|n| n.to_string()).unwrap_or_default())
             .color([0.6, 0.6, 0.6])
             .width(32),
-        button(
+        text_button(
             text(&row.title)
                 .size(14)
                 .wrapping(iced::widget::text::Wrapping::None)

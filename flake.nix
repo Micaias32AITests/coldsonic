@@ -35,9 +35,13 @@
         wayland
         libxkbcommon
         libx11
+        libxcb
         libxcursor
         libxi
         libxrandr
+        # GPUI/zed-font-kit discovers fonts through fontconfig/freetype
+        fontconfig
+        freetype
         # rfd's xdg-desktop-portal backend dlopens libdbus-1.so
         dbus
       ];

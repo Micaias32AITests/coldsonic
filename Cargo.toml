@@ -2,12 +2,14 @@
 name = "coldsonic"
 version = "0.1.0"
 edition = "2024"
+default-run = "coldsonic"
 
 [dependencies]
 anyhow = "1.0.104"
 bytes = "1.9"
 directories = "6.0"
 futures = "0.3"
+gpui-kit = { version = "0.9.1", features = ["gpui-fast"] }
 iced = { version = "0.14.0", features = ["tokio", "image", "advanced"] }
 iced_fonts = { version = "0.3", features = ["lucide"] }
 iced_futures = "0.14"
@@ -34,3 +36,17 @@ dev = ["iced/debug"]
 
 [dev-dependencies]
 tempfile = "3"
+
+[profile.dev.package]
+gpui-pre = { opt-level = 3 }
+gpui-component = { opt-level = 3 }
+gpui-kit = { opt-level = 3 }
+gpui-kit-assets = { opt-level = 3 }
+gpui-pre-platform = { opt-level = 3 }
+gpui-fast = { opt-level = 3 }
+gpui-fast-wgpu = { opt-level = 3 }
+gpui-fast-linux = { opt-level = 3 }
+gpui-fast-platform = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+taffy = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }

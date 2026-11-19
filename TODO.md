@@ -48,6 +48,16 @@ runnable. iced is deleted only at cutover.
       for self→mutation. Mirror iced's rule: children own local state, the
       parent performs mutations.
 - [ ] Sidebar with active-route highlighting; back button.
+- [ ] Navigation stack with `push`/`pop`. Each stack entry owns the
+      `Subscription`s for its screen, so popping an entry also detaches its
+      listeners (`Vec<StackEntry>` with per-entry subscriptions, not one global
+      `Vec` on `Coldsonic`).
+- [ ] Re-clicking the current sidebar path discards that route's state and
+      rebuilds it. Today `open_root_route` always recreates the root; keep the
+      same semantics for pushed paths once `push` exists (i.e. a second click
+      is a reset, not a no-op).
+- [ ] Title bar on every screen. Shared title-bar component; each screen
+      supplies its title (`Route::title`) and any actions.
 - [ ] `h_resizable` for the sidebar and right panel. Do this only after content
       looks right — don't debug layout and screen logic at once.
 - [ ] Right panel shell (`now_playing_panel` placeholder) and its toggle.
@@ -60,6 +70,9 @@ runnable. iced is deleted only at cutover.
       instead of iced `Subscription` streams.
 - [ ] Keep one tokio `Runtime` for the process; pass a `Handle`, not the
       `Runtime`, once `Services` exists.
+- [ ] Replace the remaining `block_on` calls inside `cx.spawn`
+      (`AlbumsView::new` loading albums today) with the executor seam above.
+      Screens should not know the runtime is tokio.
 
 ### 3. Now Playing and Queue
 
@@ -95,6 +108,23 @@ runnable. iced is deleted only at cutover.
 - [ ] Manual pass: scroll performance, resize, missing/corrupt covers, no library
       configured, library open failure.
 - [ ] Nix build (`nix build` / devenv) without the manual `PKG_CONFIG_PATH`.
+
+## Deferred (after `push`/`pop` exists)
+
+- [ ] **Back navigation.** Two triggers, one entry point:
+      - `Alt+Left`: a `Back` action (`gpui_kit::actions!(coldsonic, [Back])`)
+        bound with `KeyBinding::new("alt-left", Back, None)` in `run`'s `init`,
+        handled by `.on_action` on `Coldsonic`'s root element.
+      - Mouse back button: `.on_mouse_down(MouseButton::Navigate(
+        NavigationDirection::Back), ...)` on the root element. Already mapped
+        by every backend (X11 buttons 8/9, Wayland `BTN_BACK`/`BTN_SIDE`,
+        Windows XBUTTON1/2, macOS `otherMouseDown` 3/4).
+      Both call the same `back()`; `pop` is the only stack mutation. The root
+      element needs an `.id(...)` (no id means no hitbox, so no listener).
+      `back()` is a no-op while `stack.len() == 1`. `Navigate(Forward)` exists
+      if a forward stack is ever wanted.
+- [ ] Consider a visible back button in the title bar (see §1) using the same
+      `back()`; today the stack is root-only so there is nothing to go back to.
 
 ## Notes / pitfalls
 

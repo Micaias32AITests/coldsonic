@@ -284,11 +284,12 @@ CREATE TABLE meta (
 -- identifier, scan_complete, last_scan_unix_nanos
 
 CREATE TABLE artists (
-    id          TEXT PRIMARY KEY,
-    name        TEXT NOT NULL,
-    sort_name   TEXT,
-    album_count INTEGER NOT NULL DEFAULT 0,
-    cover_id    TEXT
+    id           TEXT PRIMARY KEY,       -- 'mb:<uuid>' | 'name:<normalized>'
+    name         TEXT NOT NULL,
+    sort_name    TEXT,
+    mb_artist_id TEXT,
+    album_count  INTEGER NOT NULL DEFAULT 0,
+    cover_id     TEXT
 );
 
 CREATE TABLE covers (
@@ -302,13 +303,18 @@ CREATE TABLE covers (
 );
 
 CREATE TABLE albums (
-    id          TEXT PRIMARY KEY,
-    name        TEXT NOT NULL,
-    artist_id   TEXT REFERENCES artists(id) ON DELETE SET NULL,
-    artist_name TEXT,
-    song_count  INTEGER NOT NULL DEFAULT 0,
-    duration_ms INTEGER,
-    cover_id    TEXT REFERENCES covers(id) ON DELETE SET NULL
+    id                  TEXT PRIMARY KEY, -- identity key from the scan priority
+    name                TEXT NOT NULL,
+    artist_id           TEXT REFERENCES artists(id) ON DELETE SET NULL,
+    artist_name         TEXT,             -- whole album-artist credit
+    album_sort_name     TEXT,
+    compilation         INTEGER NOT NULL DEFAULT 0,
+    mb_release_id       TEXT,
+    mb_release_group_id TEXT,
+    disc_count          INTEGER,
+    song_count          INTEGER NOT NULL DEFAULT 0,
+    duration_ms         INTEGER,
+    cover_id            TEXT REFERENCES covers(id) ON DELETE SET NULL
 );
 
 CREATE TABLE tracks (
@@ -319,8 +325,16 @@ CREATE TABLE tracks (
     album_id    TEXT REFERENCES albums(id) ON DELETE SET NULL,
     album_name  TEXT,
     track_no    INTEGER,
+    disc_no     INTEGER,
     duration_ms INTEGER NOT NULL,
     cover_id    TEXT REFERENCES covers(id) ON DELETE SET NULL
+);
+
+CREATE TABLE album_artists (
+    album_id  TEXT NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+    artist_id TEXT NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+    position  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (album_id, artist_id)
 );
 
 CREATE TABLE files (
@@ -333,9 +347,14 @@ CREATE TABLE files (
 );
 
 CREATE INDEX albums_name_idx   ON albums(name);
+CREATE INDEX albums_artist_idx ON albums(artist_id);
+CREATE INDEX albums_mb_release_idx ON albums(mb_release_id);
+CREATE INDEX albums_mb_release_group_idx ON albums(mb_release_group_id);
 CREATE INDEX tracks_title_idx  ON tracks(title);
 CREATE INDEX tracks_album_idx  ON tracks(album_id);
 CREATE INDEX tracks_artist_idx ON tracks(artist_id);
+CREATE INDEX artists_mb_idx    ON artists(mb_artist_id);
+CREATE INDEX album_artists_artist_idx ON album_artists(artist_id);
 CREATE INDEX files_track_idx   ON files(track_id);
 ```
 
@@ -343,9 +362,16 @@ Notes:
 
 - No circular FK. Only `files.track_id`; there is no `tracks.file_id`.
 - `covers` is created before `albums`/`tracks` so the references read cleanly.
-- Offline ids keep their current shapes: `ArtistId` = artist name,
-  `AlbumId` = `artist\u{0}album`, `TrackId` = relative path, `CoverId` = album
+- Offline ids: `ArtistId` = `mb:<uuid>` / `name:<normalized>` /
+  `various-artists`, `AlbumId` = the identity key from
+  `change_docs/metadata_01.md`, `TrackId` = relative path, `CoverId` = album
   directory (folder art) or audio file path (embedded art).
+- `artists()` lists artists with `album_count > 0` (album artists only);
+  track-only artists stay in the table so `tracks.artist_id` remains valid.
+- `album_artists` is the source of truth for Artists-screen membership,
+  `album_count`, and artist-detail albums. `albums.artist_id` remains the
+  primary album artist for compatibility.
+- Album tracks are ordered by `disc_no`, then `track_no`.
 - Audio whitelist (shared with the scanner):
   `mp3`, `flac`, `ogg`, `opus`, `m4a`, `wav`.
 - Folder-art whitelist (case-insensitive):

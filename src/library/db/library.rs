@@ -18,22 +18,30 @@ use crate::library::{
     LibraryError, ScanMode, Track, TrackId,
 };
 
-pub const SCHEMA_VERSION: &str = "1";
-pub const SCANNER_VERSION: &str = "1";
+pub const SCHEMA_VERSION: &str = "3";
+pub const SCANNER_VERSION: &str = "3";
 
-const TABLES: [&str; 5] = ["files", "tracks", "albums", "artists", "covers"];
+const TABLES: [&str; 6] = [
+    "files",
+    "tracks",
+    "album_artists",
+    "albums",
+    "artists",
+    "covers",
+];
 
-const SCHEMA: [&str; 14] = [
+const SCHEMA: [&str; 20] = [
     "CREATE TABLE IF NOT EXISTS meta (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
     )",
     "CREATE TABLE IF NOT EXISTS artists (
-        id          TEXT PRIMARY KEY,
-        name        TEXT NOT NULL,
-        sort_name   TEXT,
-        album_count INTEGER NOT NULL DEFAULT 0,
-        cover_id    TEXT
+        id           TEXT PRIMARY KEY,
+        name         TEXT NOT NULL,
+        sort_name    TEXT,
+        mb_artist_id TEXT,
+        album_count  INTEGER NOT NULL DEFAULT 0,
+        cover_id     TEXT
     )",
     "CREATE TABLE IF NOT EXISTS covers (
         id          TEXT PRIMARY KEY,
@@ -45,13 +53,18 @@ const SCHEMA: [&str; 14] = [
         size        INTEGER
     )",
     "CREATE TABLE IF NOT EXISTS albums (
-        id          TEXT PRIMARY KEY,
-        name        TEXT NOT NULL,
-        artist_id   TEXT REFERENCES artists(id) ON DELETE SET NULL,
-        artist_name TEXT,
-        song_count  INTEGER NOT NULL DEFAULT 0,
-        duration_ms INTEGER,
-        cover_id    TEXT REFERENCES covers(id) ON DELETE SET NULL
+        id                  TEXT PRIMARY KEY,
+        name                TEXT NOT NULL,
+        artist_id           TEXT REFERENCES artists(id) ON DELETE SET NULL,
+        artist_name         TEXT,
+        album_sort_name     TEXT,
+        compilation         INTEGER NOT NULL DEFAULT 0,
+        mb_release_id       TEXT,
+        mb_release_group_id TEXT,
+        disc_count          INTEGER,
+        song_count          INTEGER NOT NULL DEFAULT 0,
+        duration_ms         INTEGER,
+        cover_id            TEXT REFERENCES covers(id) ON DELETE SET NULL
     )",
     "CREATE TABLE IF NOT EXISTS tracks (
         id          TEXT PRIMARY KEY,
@@ -61,8 +74,15 @@ const SCHEMA: [&str; 14] = [
         album_id    TEXT REFERENCES albums(id) ON DELETE SET NULL,
         album_name  TEXT,
         track_no    INTEGER,
+        disc_no     INTEGER,
         duration_ms INTEGER NOT NULL,
         cover_id    TEXT REFERENCES covers(id) ON DELETE SET NULL
+    )",
+    "CREATE TABLE IF NOT EXISTS album_artists (
+        album_id  TEXT NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+        artist_id TEXT NOT NULL REFERENCES artists(id) ON DELETE CASCADE,
+        position  INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (album_id, artist_id)
     )",
     "CREATE TABLE IF NOT EXISTS files (
         id       INTEGER PRIMARY KEY,
@@ -78,8 +98,13 @@ const SCHEMA: [&str; 14] = [
     "CREATE INDEX IF NOT EXISTS tracks_artist_idx ON tracks(artist_id)",
     "CREATE INDEX IF NOT EXISTS files_track_idx   ON files(track_id)",
     "CREATE INDEX IF NOT EXISTS artists_name_idx  ON artists(name)",
+    "CREATE INDEX IF NOT EXISTS artists_mb_idx    ON artists(mb_artist_id)",
+    "CREATE INDEX IF NOT EXISTS albums_artist_idx ON albums(artist_id)",
+    "CREATE INDEX IF NOT EXISTS albums_mb_release_idx ON albums(mb_release_id)",
+    "CREATE INDEX IF NOT EXISTS albums_mb_release_group_idx ON albums(mb_release_group_id)",
     "CREATE INDEX IF NOT EXISTS covers_source_idx ON covers(source_path)",
     "CREATE INDEX IF NOT EXISTS tracks_cover_idx  ON tracks(cover_id)",
+    "CREATE INDEX IF NOT EXISTS album_artists_artist_idx ON album_artists(artist_id)",
 ];
 
 #[derive(Debug, Clone)]
@@ -264,6 +289,7 @@ impl LibraryDb {
     pub async fn artists(&self) -> Result<Vec<Artist>, LibraryError> {
         let rows = sqlx::query(
             "SELECT id, name, album_count, cover_id FROM artists \
+             WHERE album_count > 0 \
              ORDER BY name COLLATE NOCASE, id",
         )
         .fetch_all(&self.pool)
@@ -273,7 +299,8 @@ impl LibraryDb {
 
     pub async fn albums(&self) -> Result<Vec<Album>, LibraryError> {
         let rows = sqlx::query(
-            "SELECT id, name, artist_name, song_count, duration_ms, cover_id FROM albums \
+            "SELECT id, name, artist_name, song_count, disc_count, compilation, \
+                    duration_ms, cover_id FROM albums \
              ORDER BY name COLLATE NOCASE, artist_name COLLATE NOCASE, id",
         )
         .fetch_all(&self.pool)
@@ -283,8 +310,8 @@ impl LibraryDb {
 
     pub async fn tracks(&self) -> Result<Vec<Track>, LibraryError> {
         let rows = sqlx::query(
-            "SELECT id, title, artist_name, album_name, track_no, duration_ms, cover_id \
-             FROM tracks \
+            "SELECT id, title, artist_name, album_name, track_no, disc_no, duration_ms, \
+                    cover_id FROM tracks \
              ORDER BY title COLLATE NOCASE, artist_name COLLATE NOCASE, \
                       album_name COLLATE NOCASE, track_no IS NULL, track_no, id",
         )
@@ -304,8 +331,11 @@ impl LibraryDb {
         let artist = artist_from_row(row)?;
 
         let rows = sqlx::query(
-            "SELECT id, name, artist_name, song_count, duration_ms, cover_id FROM albums \
-             WHERE artist_id = ? ORDER BY name COLLATE NOCASE, id",
+            "SELECT albums.id, albums.name, albums.artist_name, albums.song_count, \
+                    albums.disc_count, albums.compilation, albums.duration_ms, albums.cover_id \
+             FROM albums JOIN album_artists ON album_artists.album_id = albums.id \
+             WHERE album_artists.artist_id = ? \
+             ORDER BY albums.name COLLATE NOCASE, albums.id",
         )
         .bind(id.as_str())
         .fetch_all(&mut *tx)
@@ -323,7 +353,8 @@ impl LibraryDb {
         let mut tx = self.pool.begin_with("BEGIN DEFERRED").await?;
 
         let row = sqlx::query(
-            "SELECT id, name, artist_name, song_count, duration_ms, cover_id FROM albums \
+            "SELECT id, name, artist_name, song_count, disc_count, compilation, \
+                    duration_ms, cover_id FROM albums \
              WHERE id = ?",
         )
         .bind(id.as_str())
@@ -333,9 +364,9 @@ impl LibraryDb {
         let album = album_from_row(row)?;
 
         let rows = sqlx::query(
-            "SELECT id, title, artist_name, album_name, track_no, duration_ms, cover_id \
-             FROM tracks WHERE album_id = ? \
-             ORDER BY track_no IS NULL, track_no, id",
+            "SELECT id, title, artist_name, album_name, track_no, disc_no, duration_ms, \
+                    cover_id FROM tracks WHERE album_id = ? \
+             ORDER BY disc_no IS NULL, disc_no, track_no IS NULL, track_no, id",
         )
         .bind(id.as_str())
         .fetch_all(&mut *tx)
@@ -390,7 +421,7 @@ impl LibraryDb {
 
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
-        for table in ["files", "tracks", "albums", "artists", "covers"] {
+        for table in TABLES {
             sqlx::query(&format!("DELETE FROM {table}"))
                 .execute(&mut *tx)
                 .await?;
@@ -398,12 +429,13 @@ impl LibraryDb {
 
         for artist in &data.artists {
             sqlx::query(
-                "INSERT INTO artists (id, name, sort_name, album_count, cover_id) \
-                 VALUES (?, ?, NULL, ?, ?)",
+                "INSERT INTO artists (id, name, sort_name, mb_artist_id, album_count, cover_id) \
+                 VALUES (?, ?, ?, ?, 0, ?)",
             )
+            .bind(&artist.id)
             .bind(&artist.name)
-            .bind(&artist.name)
-            .bind(artist.album_count)
+            .bind(artist.sort_name.as_deref())
+            .bind(artist.mb_artist_id.as_deref())
             .bind(artist.cover.as_deref())
             .execute(&mut *tx)
             .await?;
@@ -428,13 +460,20 @@ impl LibraryDb {
         for album in &data.albums {
             sqlx::query(
                 "INSERT INTO albums \
-                 (id, name, artist_id, artist_name, song_count, duration_ms, cover_id) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 (id, name, artist_id, artist_name, album_sort_name, compilation, \
+                  mb_release_id, mb_release_group_id, disc_count, song_count, duration_ms, \
+                  cover_id) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&album.id)
             .bind(&album.name)
+            .bind(&album.artist_id)
             .bind(&album.artist)
-            .bind(&album.artist)
+            .bind(album.album_sort_name.as_deref())
+            .bind(if album.compilation { 1i64 } else { 0i64 })
+            .bind(album.mb_release_id.as_deref())
+            .bind(album.mb_release_group_id.as_deref())
+            .bind(album.disc_count.map(i64::from))
             .bind(album.song_count)
             .bind(album.duration.map(duration_ms))
             .bind(album.cover.as_deref())
@@ -442,20 +481,41 @@ impl LibraryDb {
             .await?;
         }
 
+        for album in &data.albums {
+            for (position, artist) in album.album_artists.iter().enumerate() {
+                sqlx::query(
+                    "INSERT INTO album_artists (album_id, artist_id, position) VALUES (?, ?, ?)",
+                )
+                .bind(&album.id)
+                .bind(&artist.id)
+                .bind(position as i64)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+
+        sqlx::query(
+            "UPDATE artists SET album_count = \
+             (SELECT COUNT(*) FROM album_artists WHERE album_artists.artist_id = artists.id)",
+        )
+        .execute(&mut *tx)
+        .await?;
+
         for track in &data.tracks {
             sqlx::query(
                 "INSERT INTO tracks \
                  (id, title, artist_id, artist_name, album_id, album_name, track_no, \
-                  duration_ms, cover_id) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  disc_no, duration_ms, cover_id) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&track.id)
             .bind(&track.title)
-            .bind(&track.artist)
+            .bind(&track.artist_id)
             .bind(&track.artist)
             .bind(&track.album_id)
             .bind(&track.album)
             .bind(track.track_no.map(i64::from))
+            .bind(track.disc_no.map(i64::from))
             .bind(duration_ms(track.duration))
             .bind(track.cover.as_deref())
             .execute(&mut *tx)
@@ -531,6 +591,10 @@ fn album_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Album, LibraryError> {
         name: row.try_get("name")?,
         artist: row.try_get("artist_name")?,
         song_count: row.try_get::<i64, _>("song_count")? as u32,
+        disc_count: row
+            .try_get::<Option<i64>, _>("disc_count")?
+            .map(|count| count.max(0) as u32),
+        compilation: row.try_get::<i64, _>("compilation")? != 0,
         duration: row
             .try_get::<Option<i64>, _>("duration_ms")?
             .map(|ms| Duration::from_millis(ms.max(0) as u64)),
@@ -548,6 +612,9 @@ fn track_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Track, LibraryError> {
         album: row.try_get("album_name")?,
         track_no: row
             .try_get::<Option<i64>, _>("track_no")?
+            .map(|no| no.max(0) as u32),
+        disc_no: row
+            .try_get::<Option<i64>, _>("disc_no")?
             .map(|no| no.max(0) as u32),
         duration: Duration::from_millis(row.try_get::<i64, _>("duration_ms")?.max(0) as u64),
         cover: row

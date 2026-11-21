@@ -5,7 +5,7 @@ pub mod screens;
 use gpui_kit::{
     AnyElement, Entity, Subscription, WindowOptions, application, assets,
     base::{h_flex, v_flex},
-    component::{ActiveTheme, button::Button},
+    component::{ActiveTheme, Theme, ThemeRegistry, button::Button},
     div, init, open_window,
     prelude::*,
     px,
@@ -13,9 +13,20 @@ use gpui_kit::{
 
 use crate::gui_app::{
     route::Route,
-    screens::{albums::AlbumsEvent, artists::ArtistsView, tracks::TracksView},
+    screens::{
+        album_detail::{AlbumDetailEvent, AlbumDetailView},
+        albums::AlbumsEvent,
+        artists::{ArtistsEvent, ArtistsView},
+        tracks::{TracksEvent, TracksView},
+    },
 };
-use crate::gui_app::{route::RouteView, screens::albums::AlbumsView};
+use crate::gui_app::{
+    route::RouteView,
+    screens::{
+        albums::AlbumsView,
+        artist_detail::{ArtistDetailEvent, ArtistDetailView},
+    },
+};
 use crate::{config, library::Manager};
 
 struct Coldsonic {
@@ -70,7 +81,7 @@ impl Coldsonic {
         Button::new(id)
             .label(label)
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.open_root_route(cx, route);
+                this.open_root_route(cx, route.clone());
             }))
     }
 
@@ -99,14 +110,26 @@ impl Coldsonic {
                 let sub = cx.subscribe(&albums, Self::handle_albums_event);
                 (cx.new(|_| RouteView::Albums(albums)), vec![sub])
             }
-            Route::Artists => (
-                cx.new(|cx| RouteView::Artists(cx.new(ArtistsView::new))),
-                Vec::new(),
-            ),
-            Route::Tracks => (
-                cx.new(|cx| RouteView::Tracks(cx.new(TracksView::new))),
-                Vec::new(),
-            ),
+            Route::Artists => {
+                let artists = cx.new(|cx| ArtistsView::new(cx, handle, rt));
+                let sub = cx.subscribe(&artists, Self::handle_artists_event);
+                (cx.new(|_cx| RouteView::Artists(artists)), vec![sub])
+            }
+            Route::Tracks => {
+                let tracks = cx.new(|cx| TracksView::new(cx, handle, rt));
+                let sub = cx.subscribe(&tracks, Self::handle_tracks_event);
+                (cx.new(|_cx| RouteView::Tracks(tracks)), vec![sub])
+            }
+            Route::ArtistDetail(id) => {
+                let art_detail = cx.new(|cx| ArtistDetailView::new(cx, handle, rt, id));
+                let sub = cx.subscribe(&art_detail, Self::handle_artist_detail_event);
+                (cx.new(|_cx| RouteView::ArtistDetail(art_detail)), vec![sub])
+            }
+            Route::AlbumDetail(id) => {
+                let alb_detail = cx.new(|cx| AlbumDetailView::new(cx, handle, rt, id));
+                let sub = cx.subscribe(&alb_detail, Self::handle_album_detail_event);
+                (cx.new(|_cx| RouteView::AlbumDetail(alb_detail)), vec![sub])
+            }
         }
     }
 
@@ -114,11 +137,66 @@ impl Coldsonic {
         &mut self,
         _albums: Entity<AlbumsView>,
         event: &AlbumsEvent,
-        _cx: &mut Context<'_, Coldsonic>,
+        cx: &mut Context<'_, Coldsonic>,
     ) {
         match event {
             AlbumsEvent::Open(id) => {
-                tracing::debug!(album = %id.as_str(), "album clicked")
+                self.push_route(cx, Route::AlbumDetail(id.clone()));
+            }
+        }
+    }
+
+    fn handle_artists_event(
+        &mut self,
+        _artists: Entity<ArtistsView>,
+        event: &ArtistsEvent,
+        cx: &mut Context<'_, Coldsonic>,
+    ) {
+        match event {
+            ArtistsEvent::Open(id) => {
+                self.push_route(cx, Route::ArtistDetail(id.clone()));
+            }
+        }
+    }
+
+    fn handle_tracks_event(
+        &mut self,
+        _tracks: Entity<TracksView>,
+        event: &TracksEvent,
+        _cx: &mut Context<'_, Coldsonic>,
+    ) {
+        match event {
+            TracksEvent::Open(id) => {
+                tracing::debug!(track = %id.as_str(), "track clicked")
+            }
+        }
+    }
+
+    fn handle_artist_detail_event(
+        &mut self,
+        _albums: Entity<ArtistDetailView>,
+        event: &ArtistDetailEvent,
+        cx: &mut Context<'_, Coldsonic>,
+    ) {
+        match event {
+            ArtistDetailEvent::Open(id) => {
+                self.push_route(cx, Route::AlbumDetail(id.clone()));
+            }
+        }
+    }
+
+    fn handle_album_detail_event(
+        &mut self,
+        _albums: Entity<AlbumDetailView>,
+        event: &AlbumDetailEvent,
+        _cx: &mut Context<'_, Coldsonic>,
+    ) {
+        match event {
+            AlbumDetailEvent::Open(id) => {
+                tracing::debug!(track = %id.as_str(), "album's track clicked")
+            }
+            AlbumDetailEvent::PlayAlbum(id) => {
+                tracing::debug!(album = %id.as_str(), "play album clicked")
             }
         }
     }
@@ -131,7 +209,6 @@ impl Coldsonic {
         }
     }
 
-    #[expect(unused)]
     fn push_route(&mut self, cx: &mut Context<Self>, route: Route) {
         let (view, subscriptions) = self.make_route(cx, route);
         self.routes.push(StackEntry {
@@ -177,6 +254,8 @@ pub fn run() {
 
     application().with_assets(assets::Assets).run(|cx| {
         init(cx);
+        let theme = ThemeRegistry::global(cx).default_dark_theme().clone();
+        Theme::update(cx, |current| current.apply_config(&theme));
         open_window(WindowOptions::default(), cx, |_, cx| {
             cx.new(|cx| Coldsonic::new(cx, runtime, manager))
         })

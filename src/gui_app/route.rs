@@ -1,12 +1,20 @@
 use gpui_kit::{Entity, Render, prelude::*};
 
-use crate::gui_app::screens::{albums::AlbumsView, artists::ArtistsView, tracks::TracksView};
+use crate::{
+    gui_app::screens::{
+        album_detail::AlbumDetailView, albums::AlbumsView, artist_detail::ArtistDetailView,
+        artists::ArtistsView, tracks::TracksView,
+    },
+    library::{AlbumId, ArtistId},
+};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Route {
     Albums,
     Artists,
     Tracks,
+    ArtistDetail(ArtistId),
+    AlbumDetail(AlbumId),
 }
 
 impl Route {
@@ -15,13 +23,17 @@ impl Route {
             Self::Albums => "Albums",
             Self::Artists => "Artists",
             Self::Tracks => "Tracks",
+            Self::ArtistDetail(_) => "Artist Info",
+            Self::AlbumDetail(_) => "Album Info",
         }
     }
 }
 
 pub enum RouteView {
     Albums(Entity<AlbumsView>),
+    AlbumDetail(Entity<AlbumDetailView>),
     Artists(Entity<ArtistsView>),
+    ArtistDetail(Entity<ArtistDetailView>),
     Tracks(Entity<TracksView>),
 }
 
@@ -35,6 +47,8 @@ impl Render for RouteView {
             Self::Albums(view) => view.clone().into_any_element(),
             Self::Artists(view) => view.clone().into_any_element(),
             Self::Tracks(view) => view.clone().into_any_element(),
+            Self::ArtistDetail(view) => view.clone().into_any_element(),
+            Self::AlbumDetail(view) => view.clone().into_any_element(),
         }
     }
 }

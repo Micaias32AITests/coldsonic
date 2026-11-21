@@ -36,6 +36,80 @@ runnable. iced is deleted only at cutover.
       `retain` against the visible range (see `src/screen/covers.rs`). Release
       decoded pixels with `Image::remove_asset(cx)` once a cover is dropped.
 
+## Next up
+
+### Theme: Catppuccin Mocha
+
+Ready-to-apply recipe (verified against gpui-component 0.9.1):
+
+- [ ] Add `themes/catppuccin-mocha.json` at the repo root. Top level is a
+      `ThemeSet` (`name`, `themes: [...]`); each theme needs `name`,
+      `mode: "dark"` and a `colors` map using the same keys as
+      `gpui-component/src/theme/default-theme.json`. Leave out `is_default`
+      (defaults to false); every color is optional and missing keys fall back
+      to the built-in dark palette. Accent is `#89b4fa` (blue); mauve
+      `#cba6f7` is the usual Catppuccin pick for `primary.*`/`ring`/selection.
+- [ ] Add `src/gui_app/theme.rs`:
+
+      ```rust
+      const CATPPUCCIN_MOCHA: &str = include_str!("../../themes/catppuccin-mocha.json");
+
+      pub fn install(cx: &mut App) {
+          ThemeRegistry::global_mut(cx)
+              .load_themes_from_str(CATPPUCCIN_MOCHA)
+              .expect("catppuccin theme json is valid");
+          let config = ThemeRegistry::global(cx)
+              .themes()
+              .get("Catppuccin Mocha")
+              .cloned()
+              .expect("theme registered under its JSON name");
+          Theme::update(cx, |theme| theme.apply_config(&config));
+      }
+      ```
+
+- [ ] In `run`, replace the `default_dark_theme()` + `Theme::update` lines with
+      `init(cx); theme::install(cx);`.
+- [ ] Apply through `Theme::update`, never `Theme::global_mut`: the theme keeps
+      solid `colors`, gradient-capable `tokens` and a base-layer projection, and
+      `global_mut` leaves two of the three stale.
+- [ ] Do not use `ThemeRegistry::watch_dir` in production; it resolves `./themes`
+      from the process CWD. `include_str!` keeps the app self-contained (opt in
+      to `watch_dir` behind `dev` if theme hot reload is wanted).
+- [ ] Later: a Settings theme picker can reuse the registry
+      (`sorted_themes()` + `apply_config`), and adding a `"Catppuccin Latte"`
+      light theme to the same file gets mode switching for free.
+
+### Screen pattern audit (do before adding more screens)
+
+Every screen was written independently; extract the shared shape before the
+next one (queue, settings, search) copies it further.
+
+- [ ] Inventory the duplication:
+      - load state: `Artists`, `Tracks` and `Detail` are three copies of
+        `Loading/Loaded/Failed`; `AlbumsView` has none (renders an empty list
+        while loading and only logs the error).
+      - `block_on` inside `cx.spawn` in all five constructors
+        (`albums`, `artists`, `tracks`, `artist_detail`, `album_detail`).
+      - `ensure_cover` is copy-pasted four times.
+      - the placeholder-cover closure + `with_fallback` row cell is copy-pasted.
+      - `render_*` scaffolding (`v_flex().flex_1().h_full().min_h_0()` +
+        `uniform_list` + `track_scroll`) is near-identical.
+      - inconsistent naming: `runtime` vs `rt` fields, `Artists`/`Tracks`/
+        `Detail` state enum names, `Event::Open` vs `Event::Play`.
+- [ ] Decide the extraction boundary:
+      - shared non-entity `LoadState<T>` (Loading/Loaded/Failed + message) used
+        by every data screen, entities still separate;
+      - one fetch helper or `load()` shape so screens stop calling `block_on`;
+      - one `cover_cell(cover, size, theme)` helper for the placeholder/fallback
+        pattern;
+      - only promote to `ListState<T> { items, covers, scroll }` if the row
+        functions remain the only real difference. Do not add a screen trait.
+- [ ] Apply the pattern consistently in both directions: every list screen gets
+      loading/error/empty states, entity-owned scroll, a per-entry subscription,
+      and the same `new(cx, …)` argument order.
+- [ ] Keep it a no-behavior-change refactor (one commit per extraction step),
+      verified by running the app, before porting the remaining screens.
+
 ## Port order
 
 ### 1. Shell and navigation

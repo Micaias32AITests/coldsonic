@@ -2,6 +2,8 @@ pub mod cover;
 pub mod route;
 pub mod screens;
 
+use std::time::Duration;
+
 use gpui_kit::{
     AnyElement, Entity, Subscription, WindowOptions, application, assets,
     base::{h_flex, v_flex},
@@ -32,7 +34,6 @@ use crate::{config, library::Manager};
 struct Coldsonic {
     routes: Vec<StackEntry>,
     manager: Manager,
-    /// should go away soon
     runtime: tokio::runtime::Runtime,
 }
 
@@ -261,4 +262,33 @@ pub fn run() {
         })
         .expect("failed to open_window");
     })
+}
+
+pub fn format_duration(d: Duration) -> String {
+    let h = if d.as_secs() / 60 / 60 > 0 {
+        Some(d.as_secs() / 60 / 60)
+    } else {
+        None
+    };
+
+    let m = if h.is_some() {
+        Some(d.as_secs() / 60 % 60)
+    } else if d.as_secs() / 60 > 0 {
+        Some(d.as_secs() / 60)
+    } else {
+        None
+    };
+
+    let s = if m.is_some() {
+        d.as_secs() % 60
+    } else {
+        d.as_secs()
+    };
+
+    match (h, m) {
+        (Some(h), Some(m)) => format!("{h:02}:{m:02}:{s:02} long"),
+        (None, Some(m)) => format!("{m:02}:{s:02} long"),
+        (None, None) => format!("{s:02} seconds long"),
+        _ => "-1 seconds long".to_string(),
+    }
 }

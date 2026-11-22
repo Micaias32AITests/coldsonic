@@ -6,9 +6,9 @@
 //! but cannot mutate app state.
 //!
 //! The manager opens every enabled library's database eagerly. Opening is
-//! fast and performs no scanning; startup checks and scans run later as iced
-//! tasks. Ids are unprefixed inside a library database and prefixed on the way
-//! out, so routing a query back down is pure string work.
+//! fast and performs no scanning; startup checks and scans run later as
+//! background tasks. Ids are unprefixed inside a library database and prefixed
+//! on the way out, so routing a query back down is pure string work.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;

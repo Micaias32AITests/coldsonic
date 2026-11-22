@@ -4,18 +4,15 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use bytes::Bytes;
-use iced::Task;
-
-use crate::Action;
-use crate::library::ManagerHandle;
 
 use super::player::AudioPlayer;
 use super::queue::{Queue, QueueEntry};
-use super::{EngineError, EngineEvent, EngineMsg, NowPlaying, PlaybackState, Track};
+use super::{
+    EngineError, EngineEvent, EngineMsg, EngineResponse, NowPlaying, PlaybackState, Track,
+};
 
 #[derive(Debug)]
 pub struct RealEngine {
-    manager: ManagerHandle,
     player: AudioPlayer,
     queue: Queue,
     /// Bytes of the current track, kept so seek-fallback / Prev-restart can
@@ -30,9 +27,8 @@ pub struct RealEngine {
 }
 
 impl RealEngine {
-    pub fn open(manager: ManagerHandle) -> Self {
+    pub fn open() -> Self {
         Self {
-            manager,
             player: AudioPlayer::open(),
             queue: Queue::new(),
             current_bytes: None,
@@ -43,7 +39,7 @@ impl RealEngine {
         }
     }
 
-    pub fn update(&mut self, msg: EngineMsg) -> Action<EngineMsg, EngineEvent> {
+    pub fn update(&mut self, msg: EngineMsg) -> EngineResponse {
         match &msg {
             EngineMsg::BytesReady { generation, result } => {
                 tracing::info!(
@@ -60,7 +56,7 @@ impl RealEngine {
                 self.player.stop();
                 self.current_bytes = None;
                 match self.queue.replace(tracks) {
-                    Some(_) => return Action::task(self.start_fetch()),
+                    Some(_) => return self.start_fetch(),
                     None => {
                         self.state = PlaybackState::Stopped;
                     }
@@ -69,7 +65,7 @@ impl RealEngine {
             EngineMsg::PlayNow(track) => {
                 self.current_bytes = None;
                 self.queue.play_now(track);
-                return Action::task(self.start_fetch());
+                return self.start_fetch();
             }
             EngineMsg::Enqueue(track) => {
                 self.queue.enqueue(track);
@@ -78,7 +74,7 @@ impl RealEngine {
                 self.current_bytes = None;
                 self.player.stop();
                 match self.queue.advance() {
-                    Some(_) => return Action::task(self.start_fetch()),
+                    Some(_) => return self.start_fetch(),
                     None => {
                         self.state = PlaybackState::Stopped;
                         self.pending.push_back(EngineEvent::Stopped);
@@ -93,7 +89,7 @@ impl RealEngine {
                     }
                 } else if self.queue.step_back().is_some() {
                     self.current_bytes = None;
-                    return Action::task(self.start_fetch());
+                    return self.start_fetch();
                 }
             }
             EngineMsg::Pause => {
@@ -146,7 +142,7 @@ impl RealEngine {
             }
             EngineMsg::BytesReady { generation, result } => {
                 if generation != self.generation {
-                    return Action::none();
+                    return EngineResponse::Nothing;
                 }
                 match result {
                     Ok(bytes) => match self.play_ready(bytes) {
@@ -164,9 +160,9 @@ impl RealEngine {
         self.next_emit()
     }
 
-    pub fn tick(&mut self) -> (Vec<EngineEvent>, Task<EngineMsg>) {
+    pub fn tick(&mut self) -> (Vec<EngineEvent>, EngineResponse) {
         let mut events: Vec<EngineEvent> = self.pending.drain(..).collect();
-        let mut task = Task::none();
+        let mut response = EngineResponse::Nothing;
 
         if self.state == PlaybackState::Playing {
             events.push(EngineEvent::UpdateNowPlaying);
@@ -178,11 +174,11 @@ impl RealEngine {
                     .track
                     .clone();
                 events.push(EngineEvent::TrackFinished(finished));
-                task = self.advance();
+                response = self.advance();
             }
         }
 
-        (events, task)
+        (events, response)
     }
 
     pub fn now_playing(&self) -> Option<NowPlaying> {
@@ -204,24 +200,21 @@ impl RealEngine {
         self.queue.upcoming()
     }
 
-    fn start_fetch(&mut self) -> Task<EngineMsg> {
+    /// Ask the owner for the current track's bytes. The reply is
+    /// [`EngineMsg::BytesReady`] with the same `generation`.
+    fn start_fetch(&mut self) -> EngineResponse {
         let Some(entry) = self.queue.current() else {
-            return Task::none();
+            return EngineResponse::Nothing;
         };
         let id = entry.track.id.clone();
         self.state = PlaybackState::Loading;
         self.current_bytes = None;
         self.player.stop();
         self.generation += 1;
-        let generation = self.generation;
-        let manager = self.manager.clone();
-        Task::perform(
-            async move { manager.track_bytes(&id).await },
-            move |result| EngineMsg::BytesReady {
-                generation,
-                result: result.map_err(EngineError::from),
-            },
-        )
+        EngineResponse::LoadTrack {
+            generation: self.generation,
+            id,
+        }
     }
 
     fn play_ready(&mut self, bytes: Bytes) -> Result<Track, EngineError> {
@@ -238,7 +231,7 @@ impl RealEngine {
         Ok(track)
     }
 
-    fn restart_current(&mut self, current: Track) -> Action<EngineMsg, EngineEvent> {
+    fn restart_current(&mut self, current: Track) -> EngineResponse {
         if let Some(bytes) = self.current_bytes.clone() {
             match self.player.play_bytes(bytes) {
                 Ok(()) => {
@@ -254,7 +247,7 @@ impl RealEngine {
                 }
             }
         } else {
-            Action::task(self.start_fetch())
+            self.start_fetch()
         }
     }
 
@@ -278,7 +271,7 @@ impl RealEngine {
         let _ = self.player.try_seek(position);
     }
 
-    fn advance(&mut self) -> Task<EngineMsg> {
+    fn advance(&mut self) -> EngineResponse {
         self.current_bytes = None;
         match self.queue.advance() {
             Some(_) => self.start_fetch(),
@@ -286,7 +279,7 @@ impl RealEngine {
                 self.player.stop();
                 self.state = PlaybackState::Stopped;
                 self.pending.push_back(EngineEvent::Stopped);
-                Task::none()
+                EngineResponse::Nothing
             }
         }
     }
@@ -300,10 +293,10 @@ impl RealEngine {
         self.pending.push_back(EngineEvent::Stopped);
     }
 
-    fn next_emit(&mut self) -> Action<EngineMsg, EngineEvent> {
+    fn next_emit(&mut self) -> EngineResponse {
         match self.pending.pop_front() {
-            Some(event) => Action::emit(event),
-            None => Action::none(),
+            Some(event) => EngineResponse::Event(event),
+            None => EngineResponse::Nothing,
         }
     }
 }

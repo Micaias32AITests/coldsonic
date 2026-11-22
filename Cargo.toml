@@ -8,31 +8,17 @@ default-run = "coldsonic"
 anyhow = "1.0.104"
 bytes = "1.9"
 directories = "6.0"
-futures = "0.3"
-gpui-kit = { version = "0.9.1", features = ["gpui-fast"] }
-iced = { version = "0.14.0", features = ["tokio", "image", "advanced"] }
-iced_fonts = { version = "0.3", features = ["lucide"] }
-iced_futures = "0.14"
-itertools = "0.15.0"
+gpui-kit = { version = "0.10.0", features = ["gpui-fast"] }
 lofty = "0.25"
-notify = "8"
-notify-debouncer-full = "0.5"
-opensubsonic = "0.6.1"
-rand = "0.9"
+rand = "0.10.4"
 rodio = "0.23"
-reqwest = "0.13.5"
-rfd = "0.17.2"
 serde = { version = "1.0.229", features = ["derive"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+sqlx = { version = "0.9.1", features = ["runtime-tokio", "sqlite", "migrate"] }
 thiserror = "2.0.20"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs", "sync"] }
 toml = "1.1.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[features]
-default = []
-dev = ["iced/debug"]
 
 [dev-dependencies]
 tempfile = "3"

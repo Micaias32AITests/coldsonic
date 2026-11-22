@@ -123,9 +123,6 @@ impl Queue {
     }
 
     /// Borrowed iteration over the upcoming entries, in playback order.
-    ///
-    /// `Clone + ExactSizeIterator` lets [`crate::widget::lazy_list::lazy_list`]
-    /// consume it directly.
     pub fn upcoming(&self) -> std::collections::vec_deque::Iter<'_, QueueEntry> {
         self.upcoming.iter()
     }

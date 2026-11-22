@@ -1,40 +1,55 @@
 # GPUI port — working checklist
 
-Branch goal: rewrite the UI in GPUI (via `gpui-kit`) while the iced app stays
-runnable. iced is deleted only at cutover.
+Branch goal: rewrite the UI in GPUI (via `gpui-kit`). The iced UI and dependency
+are gone; `src/main.rs` is the GPUI entry point.
 
 ## Ground rules
 
-- Two binaries, one library:
-  - `coldsonic` — iced, `src/main.rs`, `default-run`.
-  - `coldsonic-gpui` — GPUI, `src/bin/coldsonic-gpui.rs` → `coldsonic::gui_app::run()`.
-- No direct `gpui` dependency. `gpui-kit` only (currently pinned 0.9.1 +
+- One binary, one library:
+  - `coldsonic` — GPUI, `src/main.rs` → `coldsonic::gui_app::run()`.
+- No direct `gpui` dependency. `gpui-kit` only (currently pinned 0.10.0 +
   `gpui-fast`); mixing backends produces type mismatches.
-- Do not port `src/widget/lazy_list.rs`, `src/widget/stack.rs`, or the
-  `Screen`/`Ctx`/`Action` machinery. Copy update logic, not view plumbing.
-- Do not make the GPUI app depend on `src/screen/*`; it is iced-specific.
+- Deleted with iced: `src/screen/*`, `src/widget/*`, `src/prelude.rs`'s iced
+  re-exports, and `crate::Action`. Do not reintroduce a screen trait or an
+  iced-shaped `Action`; the engine now returns `EngineResponse`.
 - Native deps live in `devenv.nix` / `flake.nix` (`fontconfig`, `freetype`,
   `libxcb`). Re-enter the dev shell before building.
-- Checks: `cargo check`, `cargo check --features dev`, `cargo run --bin coldsonic-gpui`,
-  `cargo fmt`, `cargo clippy --all-targets --features dev -- -D warnings`.
+- Checks: `cargo check --all-targets`, `cargo test`, `cargo fmt`,
+  `cargo clippy --all-targets -- -D warnings`, `cargo run`.
 
 ## Done
 
 - [x] Add GPUI/`gpui-kit` deps and native build inputs.
-- [x] Split into two binaries; keep the iced app intact behind `coldsonic`.
 - [x] GPUI window, theme, asset source, three-pane static shell.
 - [x] `uniform_list` virtualized album rows (dummy data).
 - [x] Real `Manager` + `albums()` wired into `Coldsonic`.
 - [x] Cover cache: `HashMap<CoverId, Cover>` with `Loading` / `Loaded(ImageSource)` / `Failed`,
       tokio fetch bridged to a GPUI task, `cx.notify()` on completion only.
+- [x] Cut over: iced, `src/screen`, `src/widget`, `iced_fonts`, `reqwest`,
+      `opensubsonic`, `rfd` and `notify` removed. The engine is runtime-free:
+      `update`/`tick` return `EngineResponse`, and `EngineResponse::LoadTrack`
+      asks the owner for bytes.
 
 ## Fix TODOs (found in review — do before adding screens)
 
 - [ ] **Cover cache never shrinks.** Encoded `Arc<Image>` plus GPUI's decoded
       `RenderImage` stay pinned for every album ever scrolled past. Start with
-      `cover_cache.clear()` on route change, then port `CoverMap::sync`'s
-      `retain` against the visible range (see `src/screen/covers.rs`). Release
-      decoded pixels with `Image::remove_asset(cx)` once a cover is dropped.
+      `cover_cache.clear()` on route change, then retain only ids in the visible
+      range (`git show iced-ui:src/screen/covers.rs` for the old `CoverMap::sync`
+      if the tag exists). Release decoded pixels with `Image::remove_asset(cx)`
+      once a cover is dropped.
+
+## Lost with the iced UI (port order to revisit)
+
+- [ ] **Library setup screen.** `gui_app::run` does
+      `config::load_libraries().expect(...)`, so a missing `libraries.toml` is
+      now a panic instead of a setup flow (add offline / list libraries).
+- [ ] **File watcher.** `notify` + `notify-debouncer-full` were dropped with
+      `src/screen/watcher.rs`; rescans are manual until it comes back.
+- [ ] **Now-playing panel, queue, settings, debug screen.** Ported away with
+      `src/screen/*`; only list + detail screens exist in GPUI today.
+- [ ] **`AGENTS.md`** still documents the iced `Screen`/`Ctx`/`Action`
+      architecture and must be rewritten for `gui_app`.
 
 ## Next up
 
@@ -149,12 +164,33 @@ pushed again, and `Loaded` can never refresh.
       text: branch on the variant (`Loading` text, `Failed` text + button,
       `Loaded(empty)` message, `Loaded` list).
 - [ ] Keep `Loading` assignment in the caller, not in `spawn_load`: retry clears
-      stale rows, a refresh (refocus, library changed) keeps them and lets
-      `Loaded` overwrite `Loaded`.
+      the rows, a refresh (refocus, library changed) keeps them.
 - [ ] If retry can run while a fetch is in flight, stamp each load with a
       generation counter and drop results whose stamp is stale; otherwise the
       older response can land last and overwrite the newer one. Comment, not
       code, until the button exists.
+
+### `LoadState::LoadedStale` (refresh without blanking the list)
+
+Planned shape: a fourth variant `LoadedStale(T)` so a refetch moves the data on
+screen into stale instead of a separate `refreshing: bool` next to the state.
+
+- [ ] `Loaded / LoadedStale → begin_refresh()` moves the value with
+      `mem::replace(self, Loading)` (no `T: Clone`); no-op for `Loading`/`Failed`.
+- [ ] Every data accessor includes both data arms, or the list blanks when a
+      refresh starts: `items()`, `is_empty()`, and `loaded()` (rename to `data()`
+      — it returns data for a stale state too). `state_message()` returns `None`
+      for `LoadedStale`. Apply stays `this.x = state`, because stale→fresh is a
+      plain assignment.
+- [ ] Decide what a failed refresh does: `Failed` (data lost, fine for
+      user-initiated reload), stay stale + log (data kept, but two meanings
+      behind one variant), or `LoadedStale { value, error }` (accurate, struct
+      variant). Pick before the first automatic refresh exists.
+- [ ] Decide what stale looks like in the UI (dim, spinner, nothing). "Nothing"
+      is fine, but then document why the variant exists, or it will get folded
+      back into `Loaded`.
+- [ ] The generation stamp above applies here too: two overlapping refreshes can
+      settle `LoadedStale` → `Loaded(old)`.
 
 ## Port order
 
@@ -165,7 +201,7 @@ pushed again, and `Loaded` can never refresh.
 - [ ] `Route` becomes retained `Entity<...>` children instead of `match` arms in
       one struct (buried-screen state for free — no `stack` widget).
 - [ ] `EventEmitter` + `cx.subscribe` for child→parent intents; `cx.listener`
-      for self→mutation. Mirror iced's rule: children own local state, the
+      for self→mutation. Same rule as before: children own local state, the
       parent performs mutations.
 - [ ] Sidebar with active-route highlighting; back button.
 - [ ] Navigation stack with `push`/`pop`. Each stack entry owns the
@@ -184,20 +220,24 @@ pushed again, and `Loaded` can never refresh.
 
 ### 2. Engine seam (blocks playback)
 
-- [ ] Remove `iced::Task` from `src/lib.rs`, `src/engine/*`, and the watcher.
-      `Engine` must be UI-framework agnostic.
-- [ ] Bridge tokio → GPUI with channels (`async_channel` or `tokio::sync::mpsc`)
-      instead of iced `Subscription` streams.
+- [x] Remove `iced::Task`: `Engine::update`/`tick` now return `EngineResponse`.
+      `EngineResponse::LoadTrack { generation, id }` is the IO contract — the
+      owner fetches `manager.track_bytes(&id)` and feeds
+      `EngineMsg::BytesReady { generation, result }` back into `update`.
+- [ ] Wire that contract in the shell: on `LoadTrack`, run the fetch on the
+      tokio `Handle` and send `BytesReady` back (no runtime in the engine).
+- [ ] Drive `Engine::update` events (`EngineResponse::Event`) and the tick loop
+      into GPUI without iced `Subscription` streams.
 - [ ] Keep one tokio `Runtime` for the process; pass a `Handle`, not the
       `Runtime`, once `Services` exists.
-- [ ] Replace the remaining `block_on` calls inside `cx.spawn`
-      (`AlbumsView::new` loading albums today) with the executor seam above.
-      Screens should not know the runtime is tokio.
+- [ ] Replace the remaining `block_on` calls with the executor seam above.
+      `AlbumsView` already uses `spawn_load_on_library`; the other four screens
+      still `block_on` inside `cx.spawn`.
 
 ### 3. Now Playing and Queue
 
 - [ ] Now-playing bar: cover, title/artist, transport, seek, volume.
-- [ ] Tick loop replaces the iced subscription tick (`cx.spawn` timer +
+- [ ] Tick loop replaces the old subscription tick (`cx.spawn` timer +
       `cx.notify()`), no UI-thread blocking.
 - [ ] `seeking` draft so the 250 ms tick doesn't yank the thumb.
 - [ ] Queue screen reuses the virtualized row pattern.
@@ -215,16 +255,17 @@ pushed again, and `Loaded` can never refresh.
 
 ### 5. Cutover
 
-- [ ] Make `coldsonic-gpui` the default binary (`default-run`, rename).
-- [ ] Delete `src/screen`, `src/widget`, and the iced `src/main.rs`.
-- [ ] Remove `iced`, `iced_fonts`, `iced_futures` and the `image::Handle` uses.
+- [x] Make the GPUI binary the only binary (`src/main.rs`, no `default-run`).
+- [x] Delete `src/screen`, `src/widget`, and the iced `src/main.rs`.
+- [x] Remove `iced`, `iced_fonts`, `iced_futures`, `reqwest`, `opensubsonic`,
+      `rfd`, `notify`, `itertools`, `futures`, `derive_more`.
 - [ ] Update `AGENTS.md` and `change_docs/` (screen architecture section is
-      iced-specific and will be replaced by the entity model).
-- [ ] Confirm `cargo test` still covers manager/engine logic.
+      iced-specific and must be replaced by the entity model).
+- [x] Confirm `cargo test` still covers manager/engine logic (46 tests).
 
 ### 6. Finish
 
-- [ ] `cargo fmt`, `cargo clippy --all-targets --features dev -D warnings`.
+- [ ] `cargo fmt`, `cargo clippy --all-targets -- -D warnings`.
 - [ ] Manual pass: scroll performance, resize, missing/corrupt covers, no library
       configured, library open failure.
 - [ ] Nix build (`nix build` / devenv) without the manual `PKG_CONFIG_PATH`.

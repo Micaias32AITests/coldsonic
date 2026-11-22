@@ -217,7 +217,7 @@ impl LibraryDb {
             .is_some_and(|value| value != SCHEMA_VERSION)
         {
             for table in TABLES {
-                sqlx::query(&format!("DROP TABLE IF EXISTS {table}"))
+                sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE IF EXISTS {table}")))
                     .execute(&self.pool)
                     .await?;
             }
@@ -422,7 +422,7 @@ impl LibraryDb {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         for table in TABLES {
-            sqlx::query(&format!("DELETE FROM {table}"))
+            sqlx::query(sqlx::AssertSqlSafe(format!("DELETE FROM {table}")))
                 .execute(&mut *tx)
                 .await?;
         }

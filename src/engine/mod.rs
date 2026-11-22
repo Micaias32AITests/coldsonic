@@ -12,10 +12,7 @@ pub mod real;
 
 use std::time::Duration;
 
-use iced::Task;
-
-use crate::Action;
-use crate::library::ManagerHandle;
+use crate::library::TrackId;
 
 pub use queue::{Queue, QueueEntry, QueueEntryId};
 
@@ -69,6 +66,30 @@ pub enum EngineEvent {
     Error(String),
 }
 
+/// What the engine asks its owner to do after [`Engine::update`] or
+/// [`Engine::tick`].
+///
+/// The engine itself never touches a runtime: async work leaves as a request
+/// and comes back as an [`EngineMsg`], so the UI layer decides how to run it.
+#[derive(Debug, Clone, Default)]
+pub enum EngineResponse {
+    /// Nothing to do.
+    #[default]
+    Nothing,
+    /// An event to push to the UI.
+    Event(EngineEvent),
+    /// The engine needs the bytes of `id` before playback can start. The owner
+    /// fetches them and feeds `EngineMsg::BytesReady { generation, .. }` back
+    /// into [`Engine::update`].
+    LoadTrack { generation: u64, id: TrackId },
+}
+
+impl From<EngineEvent> for EngineResponse {
+    fn from(event: EngineEvent) -> Self {
+        Self::Event(event)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackState {
     Stopped,
@@ -88,8 +109,8 @@ pub struct NowPlaying {
     pub volume: f32,
 }
 
-/// Errors surfaced by the engine. Clone so [`EngineMsg::BytesReady`] can ride
-/// iced's `Msg: Clone` bound (`std::io::Error` is not Clone).
+/// Errors surfaced by the engine. Clone so [`EngineMsg::BytesReady`] can be
+/// handed back by the owner's fetch task (`std::io::Error` is not Clone).
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum EngineError {
     #[error("{0}")]
@@ -105,7 +126,7 @@ impl From<crate::library::LibraryError> for EngineError {
 }
 
 /// The engine itself. Not `Clone`: the real variant owns a `!Send` device
-/// sink. iced does not require `Clone` on screen state.
+/// sink.
 #[derive(Debug)]
 pub enum Engine {
     Mock(mock::MockEngine),
@@ -117,22 +138,22 @@ impl Engine {
         Self::Mock(mock::MockEngine::new())
     }
 
-    pub fn real(handle: ManagerHandle) -> Self {
-        Self::Real(real::RealEngine::open(handle))
+    pub fn real() -> Self {
+        Self::Real(real::RealEngine::open())
     }
 
-    /// Route a UI command into the engine. The returned
-    /// [`Action`](crate::Action) carries any immediate [`EngineEvent`].
-    pub fn update(&mut self, msg: EngineMsg) -> Action<EngineMsg, EngineEvent> {
+    /// Route a UI command into the engine. The returned [`EngineResponse`]
+    /// carries any immediate [`EngineEvent`] and any work the owner must run.
+    pub fn update(&mut self, msg: EngineMsg) -> EngineResponse {
         match self {
             Engine::Mock(engine) => engine.update(msg),
             Engine::Real(engine) => engine.update(msg),
         }
     }
 
-    /// Called by `MainScreen` on each tick. Events are pushed to the UI;
-    /// the task (if any) is a fetch kicked off by auto-advance.
-    pub fn tick(&mut self) -> (Vec<EngineEvent>, Task<EngineMsg>) {
+    /// Called by the shell on each tick. Events are pushed to the UI; the
+    /// response carries a fetch kicked off by auto-advance.
+    pub fn tick(&mut self) -> (Vec<EngineEvent>, EngineResponse) {
         match self {
             Engine::Mock(engine) => engine.tick(),
             Engine::Real(engine) => engine.tick(),
@@ -148,8 +169,7 @@ impl Engine {
 
     /// Borrowed iteration over the upcoming queue, in playback order.
     ///
-    /// `Clone + ExactSizeIterator` lets `lazy_list` consume it directly. There
-    /// is deliberately no mutable accessor: mutations go through
+    /// There is deliberately no mutable accessor: mutations go through
     /// [`EngineMsg`].
     pub fn queue(&self) -> std::collections::vec_deque::Iter<'_, QueueEntry> {
         match self {

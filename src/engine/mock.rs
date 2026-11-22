@@ -8,12 +8,8 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use iced::Task;
-
-use crate::Action;
-
 use super::queue::{Queue, QueueEntry};
-use super::{EngineEvent, EngineMsg, NowPlaying, PlaybackState};
+use super::{EngineEvent, EngineMsg, EngineResponse, NowPlaying, PlaybackState};
 
 /// Fake playback speed: each 250 ms tick advances the position a second so the
 /// mock bar visibly moves.
@@ -27,7 +23,7 @@ pub struct MockEngine {
     /// Engine-owned volume (0.0–1.0), read by the bar from the snapshot.
     volume: f32,
     /// Events produced by `update` that couldn't all ride the single
-    /// `Action::Emit` in one call; drained on subsequent `tick`s.
+    /// `EngineResponse::Event` in one call; drained on subsequent `tick`s.
     pending: VecDeque<EngineEvent>,
 }
 
@@ -48,7 +44,7 @@ impl MockEngine {
         }
     }
 
-    pub fn update(&mut self, msg: EngineMsg) -> Action<EngineMsg, EngineEvent> {
+    pub fn update(&mut self, msg: EngineMsg) -> EngineResponse {
         tracing::info!(?msg, "engine msg");
         match msg {
             EngineMsg::PlayQueue(tracks) => {
@@ -154,7 +150,7 @@ impl MockEngine {
         self.next_emit()
     }
 
-    pub fn tick(&mut self) -> (Vec<EngineEvent>, Task<EngineMsg>) {
+    pub fn tick(&mut self) -> (Vec<EngineEvent>, EngineResponse) {
         let mut events: Vec<EngineEvent> = self.pending.drain(..).collect();
 
         if self.state == PlaybackState::Playing {
@@ -176,7 +172,7 @@ impl MockEngine {
             }
         }
 
-        (events, Task::none())
+        (events, EngineResponse::Nothing)
     }
 
     pub fn now_playing(&self) -> Option<NowPlaying> {
@@ -210,11 +206,11 @@ impl MockEngine {
         }
     }
 
-    /// Pop one pending event for the single `Action::Emit` slot.
-    fn next_emit(&mut self) -> Action<EngineMsg, EngineEvent> {
+    /// Pop one pending event for the single `EngineResponse::Event` slot.
+    fn next_emit(&mut self) -> EngineResponse {
         match self.pending.pop_front() {
-            Some(event) => Action::emit(event),
-            None => Action::none(),
+            Some(event) => EngineResponse::Event(event),
+            None => EngineResponse::Nothing,
         }
     }
 }

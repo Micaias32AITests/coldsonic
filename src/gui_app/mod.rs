@@ -5,7 +5,7 @@ pub mod screens;
 use std::time::Duration;
 
 use gpui_kit::{
-    AnyElement, Entity, Subscription, WindowOptions, application, assets,
+    AnyElement, Entity, Global, Subscription, WindowOptions, application, assets,
     base::{h_flex, v_flex},
     component::{ActiveTheme, Theme, ThemeRegistry, button::Button},
     div, init, open_window,
@@ -31,10 +31,21 @@ use crate::gui_app::{
 };
 use crate::{config, library::Manager};
 
+#[derive(Clone)]
+pub struct RT(pub tokio::runtime::Handle);
+
+impl Global for RT {}
+
+impl RT {
+    pub fn get(&self) -> tokio::runtime::Handle {
+        self.0.clone()
+    }
+}
+
 struct Coldsonic {
     routes: Vec<StackEntry>,
     manager: Manager,
-    runtime: tokio::runtime::Runtime,
+    _runtime: tokio::runtime::Runtime,
 }
 
 impl Coldsonic {
@@ -42,7 +53,7 @@ impl Coldsonic {
         let mut this = Self {
             routes: Vec::new(),
             manager,
-            runtime: rt,
+            _runtime: rt,
         };
 
         this.open_root_route(cx, Route::Albums);
@@ -103,31 +114,30 @@ impl Coldsonic {
         route: Route,
     ) -> (Entity<RouteView>, Vec<Subscription>) {
         let handle = self.manager.handle();
-        let rt = self.runtime.handle().clone();
 
         match route {
             Route::Albums => {
-                let albums = cx.new(|cx| AlbumsView::new(cx, handle, rt));
+                let albums = cx.new(|cx| AlbumsView::new(cx, handle));
                 let sub = cx.subscribe(&albums, Self::handle_albums_event);
                 (cx.new(|_| RouteView::Albums(albums)), vec![sub])
             }
             Route::Artists => {
-                let artists = cx.new(|cx| ArtistsView::new(cx, handle, rt));
+                let artists = cx.new(|cx| ArtistsView::new(cx, handle));
                 let sub = cx.subscribe(&artists, Self::handle_artists_event);
                 (cx.new(|_cx| RouteView::Artists(artists)), vec![sub])
             }
             Route::Tracks => {
-                let tracks = cx.new(|cx| TracksView::new(cx, handle, rt));
+                let tracks = cx.new(|cx| TracksView::new(cx, handle));
                 let sub = cx.subscribe(&tracks, Self::handle_tracks_event);
                 (cx.new(|_cx| RouteView::Tracks(tracks)), vec![sub])
             }
             Route::ArtistDetail(id) => {
-                let art_detail = cx.new(|cx| ArtistDetailView::new(cx, handle, rt, id));
+                let art_detail = cx.new(|cx| ArtistDetailView::new(cx, handle, id));
                 let sub = cx.subscribe(&art_detail, Self::handle_artist_detail_event);
                 (cx.new(|_cx| RouteView::ArtistDetail(art_detail)), vec![sub])
             }
             Route::AlbumDetail(id) => {
-                let alb_detail = cx.new(|cx| AlbumDetailView::new(cx, handle, rt, id));
+                let alb_detail = cx.new(|cx| AlbumDetailView::new(cx, handle, id));
                 let sub = cx.subscribe(&alb_detail, Self::handle_album_detail_event);
                 (cx.new(|_cx| RouteView::AlbumDetail(alb_detail)), vec![sub])
             }
@@ -255,6 +265,7 @@ pub fn run() {
 
     application().with_assets(assets::Assets).run(|cx| {
         init(cx);
+        cx.set_global(RT(runtime.handle().clone()));
         let theme = ThemeRegistry::global(cx).default_dark_theme().clone();
         Theme::update(cx, |current| current.apply_config(&theme));
         open_window(WindowOptions::default(), cx, |_, cx| {

@@ -1,7 +1,10 @@
 use gpui_kit::{AnyElement, Hsla, ObjectFit, Pixels, SharedString, div, img, prelude::*};
 
 use crate::{
-    gui_app::cover::{Cover, CoverCache, SMALL_COVER_PX, decode},
+    gui_app::{
+        RT,
+        cover::{Cover, CoverCache, SMALL_COVER_PX, decode},
+    },
     library::{CoverId, ManagerHandle},
 };
 
@@ -63,7 +66,6 @@ impl<T> LoadState<Vec<T>> {
 // insane function signature btw
 pub fn spawn_load_on_library<T, V>(
     cx: &mut Context<T>,
-    rt: tokio::runtime::Handle,
     fetch: impl Future<Output = Result<V, crate::library::LibraryError>> + Send + 'static,
     apply: impl FnOnce(&mut T, LoadState<V>) + 'static,
 ) where
@@ -71,6 +73,7 @@ pub fn spawn_load_on_library<T, V>(
     V: Send + 'static,
 {
     let (tx, rx) = tokio::sync::oneshot::channel();
+    let rt = cx.global::<RT>().get();
 
     rt.spawn(async move {
         let _ = tx.send(fetch.await);
@@ -125,7 +128,6 @@ pub trait HasCovers {
 pub fn ensure_cover<T: HasCovers + 'static>(
     covers: &mut CoverCache,
     manager: ManagerHandle,
-    rt: &tokio::runtime::Handle,
     cx: &mut Context<T>,
     id: &CoverId,
 ) {
@@ -135,6 +137,7 @@ pub fn ensure_cover<T: HasCovers + 'static>(
     let fetch_id = id.clone();
 
     let (tx, rx) = tokio::sync::oneshot::channel();
+    let rt = cx.global::<RT>().get();
 
     rt.spawn(async move {
         let _ = tx.send(manager.cover(&fetch_id, SMALL_COVER_PX).await);

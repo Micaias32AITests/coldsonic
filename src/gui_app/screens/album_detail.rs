@@ -23,7 +23,6 @@ use crate::{
 pub struct AlbumDetailView {
     covers: CoverCache,
     detail: LoadState<AlbumDetail>,
-    rt: tokio::runtime::Handle,
     manager: ManagerHandle,
     scroll: UniformListScrollHandle,
 }
@@ -45,28 +44,20 @@ impl AlbumDetailView {
     pub fn new(
         cx: &mut Context<'_, AlbumDetailView>,
         manager: ManagerHandle,
-        rt: tokio::runtime::Handle,
         album_id: AlbumId,
     ) -> Self {
-        Self::load(cx, manager.clone(), rt.clone(), album_id);
+        Self::load(cx, manager.clone(), album_id);
         Self {
             covers: CoverCache::default(),
             detail: LoadState::default(),
-            rt,
             manager,
             scroll: UniformListScrollHandle::new(),
         }
     }
 
-    fn load(
-        cx: &mut Context<Self>,
-        manager: ManagerHandle,
-        rt: tokio::runtime::Handle,
-        album_id: AlbumId,
-    ) {
+    fn load(cx: &mut Context<Self>, manager: ManagerHandle, album_id: AlbumId) {
         spawn_load_on_library(
             cx,
-            rt,
             async move { manager.album(&album_id).await },
             |this, load_state| this.detail = load_state,
         );
@@ -114,8 +105,8 @@ impl Render for AlbumDetailView {
         };
 
         if let Some(ref cover_id) = detail.album.cover {
-            let (manager, rt) = (self.manager.clone(), self.rt.clone());
-            ensure_cover(&mut self.covers, manager, &rt, cx, cover_id);
+            let manager = self.manager.clone();
+            ensure_cover(&mut self.covers, manager, cx, cover_id);
         }
         v_flex()
             .margins(px(5.))
@@ -130,7 +121,7 @@ impl Render for AlbumDetailView {
                     cx.processor(move |this, range: Range<usize>, _window, cx| {
                         range
                             .map(|i| {
-                                let (manager, rt) = (this.manager.clone(), this.rt.clone());
+                                let manager = this.manager.clone();
 
                                 let Some(detail) = this.detail.loaded() else {
                                     unreachable!("should be loaded");
@@ -145,7 +136,7 @@ impl Render for AlbumDetailView {
                                 let cover_id = track.cover.clone();
 
                                 if let Some(id) = &cover_id {
-                                    ensure_cover(this.covers(), manager, &rt, cx, id);
+                                    ensure_cover(this.covers(), manager, cx, id);
                                 }
 
                                 let cover = cover_cell(

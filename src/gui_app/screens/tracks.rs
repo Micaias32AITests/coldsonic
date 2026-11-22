@@ -1,23 +1,26 @@
 use std::ops::Range;
 
 use gpui_kit::{
-    EventEmitter, ObjectFit, SharedString, UniformListScrollHandle,
+    EventEmitter, UniformListScrollHandle,
     base::{h_flex, v_flex},
     component::ActiveTheme,
-    div, img,
     prelude::*,
     px, uniform_list,
 };
 
 use crate::{
-    gui_app::cover::{Cover, CoverCache, SMALL_COVER_PX, decode},
-    library::{CoverId, ManagerHandle, Track, TrackId},
+    gui_app::{
+        cover::CoverCache,
+        screens::{
+            HasCovers, LoadState, cover_cell, ensure_cover, placeholder, spawn_load_on_library,
+        },
+    },
+    library::{ManagerHandle, Track, TrackId},
 };
 
 pub struct TracksView {
     covers: CoverCache,
-    tracks: Tracks,
-    rt: tokio::runtime::Handle,
+    tracks: LoadState<Vec<Track>>,
     manager: ManagerHandle,
     scroll: UniformListScrollHandle,
 }
@@ -28,76 +31,29 @@ pub enum TracksEvent {
 
 impl EventEmitter<TracksEvent> for TracksView {}
 
-pub enum Tracks {
-    Loading,
-    Loaded(Vec<Track>),
-    Failed(SharedString),
+impl HasCovers for TracksView {
+    fn covers(&mut self) -> &mut CoverCache {
+        &mut self.covers
+    }
 }
 
 impl TracksView {
-    pub(crate) fn new(
-        cx: &mut Context<'_, TracksView>,
-        manager: ManagerHandle,
-        rt: tokio::runtime::Handle,
-    ) -> Self {
-        let r = rt.clone();
-        let m = manager.clone();
-        cx.spawn(async move |this, cx| {
-            let tracks = r.clone().block_on(m.clone().tracks());
-
-            this.update(cx, |this, cx| {
-                this.tracks = match tracks {
-                    Ok(vec) => Tracks::Loaded(vec),
-                    Err(e) => Tracks::Failed(e.to_string().into()),
-                };
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+    pub(crate) fn new(cx: &mut Context<'_, TracksView>, manager: ManagerHandle) -> Self {
+        Self::load(cx, manager.clone());
         Self {
             covers: CoverCache::default(),
-            tracks: Tracks::Loading,
-            rt,
+            tracks: LoadState::default(),
             manager,
             scroll: UniformListScrollHandle::new(),
         }
     }
 
-    fn ensure_cover(&mut self, id: &CoverId, cx: &mut Context<Self>) {
-        if !self.covers.start_fetch(id) {
-            return;
-        }
-        let fetch_id = id.clone();
-
-        let manager = self.manager.clone();
-        let rt = self.rt.clone();
-        let (tx, rx) = tokio::sync::oneshot::channel();
-
-        rt.spawn(async move {
-            let _ = tx.send(manager.cover(&fetch_id, SMALL_COVER_PX).await);
-        });
-
-        let cover_id = id.clone();
-        cx.spawn(async move |this, cx| {
-            let Ok(result) = rx.await else { return };
-
-            let cover = match result {
-                Ok(bytes) => decode(&bytes),
-                Err(err) => {
-                    tracing::debug!(%err, "cover fetch failed");
-                    Cover::Failed
-                }
-            };
-
-            this.update(cx, |this, cx| {
-                if this.covers.end_fetch(cover_id, cover) {
-                    cx.notify()
-                }
-            })
-            .ok();
-        })
-        .detach();
+    fn load(cx: &mut Context<Self>, manager: ManagerHandle) {
+        spawn_load_on_library(
+            cx,
+            async move { manager.tracks().await },
+            |this, load_state| this.tracks = load_state,
+        );
     }
 
     fn render_tracks(&self, cx: &mut Context<Self>, tracks: &[Track]) -> impl IntoElement {
@@ -119,25 +75,14 @@ impl TracksView {
                             let cover_id = track.cover.clone();
 
                             if let Some(id) = &cover_id {
-                                this.ensure_cover(id, cx);
+                                ensure_cover(&mut this.covers, this.manager.clone(), cx, id);
                             }
 
-                            let placeholder_cover = move || {
-                                div()
-                                    .size(px(40.))
-                                    .rounded_md()
-                                    .bg(theme_muted)
-                                    .into_any_element()
-                            };
-                            let cover = match cover_id.and_then(|id| this.covers.get(&id)) {
-                                Some(Cover::Loaded(src)) => img(src.clone())
-                                    .size(px(40.))
-                                    .rounded_md()
-                                    .object_fit(ObjectFit::Cover)
-                                    .with_fallback(placeholder_cover)
-                                    .into_any_element(),
-                                _ => placeholder_cover(),
-                            };
+                            let cover = cover_cell(
+                                cover_id.and_then(|id| this.covers.get(&id)),
+                                px(40.),
+                                theme_muted,
+                            );
 
                             h_flex()
                                 .id(("main.tracks.track", i))
@@ -170,9 +115,9 @@ impl Render for TracksView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         match &self.tracks {
-            Tracks::Loaded(vec) => self.render_tracks(cx, vec).into_any_element(),
-            Tracks::Failed(s) => format!("failed to load tracks: {s}").into_any_element(),
-            Tracks::Loading => "Loading...".into_any_element(),
+            LoadState::Loaded(vec) => self.render_tracks(cx, vec).into_any_element(),
+            LoadState::Failed(s) => placeholder(s),
+            LoadState::Loading => placeholder("Loading..."),
         }
     }
 }

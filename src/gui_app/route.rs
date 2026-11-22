@@ -17,18 +17,6 @@ pub enum Route {
     AlbumDetail(AlbumId),
 }
 
-impl Route {
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::Albums => "Albums",
-            Self::Artists => "Artists",
-            Self::Tracks => "Tracks",
-            Self::ArtistDetail(_) => "Artist Info",
-            Self::AlbumDetail(_) => "Album Info",
-        }
-    }
-}
-
 pub enum RouteView {
     Albums(Entity<AlbumsView>),
     AlbumDetail(Entity<AlbumDetailView>),

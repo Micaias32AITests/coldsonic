@@ -12,7 +12,7 @@ use gpui_kit::{
 use crate::{
     gui_app::{
         cover::{Cover, CoverCache, SMALL_COVER_PX, decode},
-        screens::nothing_to_see_here,
+        screens::placeholder,
     },
     library::{AlbumId, ArtistDetail, ArtistId, CoverId, ManagerHandle},
 };
@@ -172,7 +172,7 @@ impl Render for ArtistDetailView {
     ) -> impl IntoElement {
         match &self.detail {
             Some(detail) => self.view_detail(cx, detail).into_any_element(),
-            None => nothing_to_see_here(),
+            None => placeholder("Nothing to see here..."),
         }
     }
 }

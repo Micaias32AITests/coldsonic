@@ -110,6 +110,52 @@ next one (queue, settings, search) copies it further.
 - [ ] Keep it a no-behavior-change refactor (one commit per extraction step),
       verified by running the app, before porting the remaining screens.
 
+Progress: `LoadState<T>`, `spawn_load_on_library`, `cover_cell`, `ensure_cover`
+(+ `HasCovers`) and `placeholder` exist in `screens/mod.rs`; `AlbumsView` is
+retrofitted. The other four screens still call `block_on` and keep their own
+`Loading/Loaded/Failed` enums.
+
+### Screen reload / retry shape (add with the first retry button)
+
+There is no way to re-run a load. `spawn_load_on_library` takes a `Future`, and
+the recipe only exists inside `new`, so `Failed` is terminal until the route is
+pushed again, and `Loaded` can never refresh.
+
+- [ ] Move the recipe out of `new` into an associated fn that takes
+      `&mut Context<Self>` (not `&mut self`: in `new` the `Self` value is a
+      plain local and `cx.spawn`'s `this.update` only hands out `&mut Self`
+      once the entity exists):
+
+      ```rust
+      fn load(cx: &mut Context<Self>, manager: &ManagerHandle, rt: &Handle) {
+          let manager = manager.clone();
+          let rt = rt.clone();
+          spawn_load_on_library(
+              cx,
+              rt,
+              async move { manager.albums().await },
+              |this, load_state| this.albums = load_state,
+          );
+      }
+      ```
+
+      `new` ends with `Self::load(cx, &this.manager, &this.runtime);`.
+- [ ] Retry is then the same call: set `LoadState::Loading`, `cx.notify()`,
+      `Self::load(...)`.
+- [ ] Store the params a retry needs. Detail screens currently drop their id
+      after building the future (`AlbumDetailView`/`ArtistDetailView` have no
+      `album_id`/`artist_id` field), so add the field while extracting.
+- [ ] `state_message()` is not enough once `Failed` renders a retry button, not
+      text: branch on the variant (`Loading` text, `Failed` text + button,
+      `Loaded(empty)` message, `Loaded` list).
+- [ ] Keep `Loading` assignment in the caller, not in `spawn_load`: retry clears
+      stale rows, a refresh (refocus, library changed) keeps them and lets
+      `Loaded` overwrite `Loaded`.
+- [ ] If retry can run while a fetch is in flight, stamp each load with a
+      generation counter and drop results whose stamp is stale; otherwise the
+      older response can land last and overwrite the newer one. Comment, not
+      code, until the button exists.
+
 ## Port order
 
 ### 1. Shell and navigation

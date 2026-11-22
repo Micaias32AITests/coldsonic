@@ -26,7 +26,7 @@ pub struct AlbumsView {
     albums: LoadState<Vec<Album>>,
     covers: CoverCache,
     manager: ManagerHandle,
-    runtime: tokio::runtime::Handle,
+    rt: tokio::runtime::Handle,
     scroll: UniformListScrollHandle,
 }
 
@@ -39,27 +39,27 @@ impl HasCovers for AlbumsView {
 }
 
 impl AlbumsView {
-    pub fn new(
-        cx: &mut Context<Self>,
-        manager: ManagerHandle,
-        runtime: tokio::runtime::Handle,
-    ) -> Self {
+    pub fn new(cx: &mut Context<Self>, manager: ManagerHandle, rt: tokio::runtime::Handle) -> Self {
         let this = Self {
             albums: LoadState::default(),
             covers: CoverCache::default(),
             manager: manager.clone(),
-            runtime: runtime.clone(),
+            rt: rt.clone(),
             scroll: UniformListScrollHandle::new(),
         };
 
+        Self::load(cx, manager, rt);
+
+        this
+    }
+
+    fn load(cx: &mut Context<Self>, manager: ManagerHandle, rt: tokio::runtime::Handle) {
         spawn_load_on_library(
             cx,
-            runtime,
+            rt,
             async move { manager.albums().await },
             |this, load_state| this.albums = load_state,
         );
-
-        this
     }
 
     fn show_albums(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -94,7 +94,7 @@ impl AlbumsView {
                                     ensure_cover(
                                         &mut this.covers,
                                         this.manager.clone(),
-                                        &this.runtime,
+                                        &this.rt,
                                         cx,
                                         id,
                                     );

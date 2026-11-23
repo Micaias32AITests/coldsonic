@@ -12,8 +12,10 @@ pub mod real;
 
 use std::time::Duration;
 
-use crate::library::TrackId;
+use crate::library::{ManagerHandle, TrackId};
 
+use bytes::Bytes;
+use gpui_kit::{App, Context, Entity, Global};
 pub use queue::{Queue, QueueEntry, QueueEntryId};
 
 /// What we play — the neutral track every provider hands over.
@@ -129,40 +131,90 @@ impl From<crate::library::LibraryError> for EngineError {
 /// sink.
 #[derive(Debug)]
 pub enum Engine {
-    Mock(mock::MockEngine),
     Real(real::RealEngine),
 }
 
-impl Engine {
-    pub fn mock() -> Self {
-        Self::Mock(mock::MockEngine::new())
-    }
+#[derive(Clone)]
+pub struct EngineHandle(pub Entity<Engine>);
+impl Global for EngineHandle {}
 
-    pub fn real() -> Self {
-        Self::Real(real::RealEngine::open())
+impl EngineHandle {
+    pub fn get<T>(cx: &App) -> Entity<Engine> {
+        cx.global::<EngineHandle>().0.clone()
+    }
+}
+
+impl Engine {
+    pub fn real(cx: &mut Context<Self>, m_handle: ManagerHandle) -> Self {
+        Self::Real(real::RealEngine::open(m_handle))
     }
 
     /// Route a UI command into the engine. The returned [`EngineResponse`]
     /// carries any immediate [`EngineEvent`] and any work the owner must run.
     pub fn update(&mut self, msg: EngineMsg) -> EngineResponse {
         match self {
-            Engine::Mock(engine) => engine.update(msg),
             Engine::Real(engine) => engine.update(msg),
         }
+    }
+
+    pub fn play_queue(&mut self, cx: &mut Context<Self>, queue: Vec<Track>) {
+        todo!()
+    }
+
+    pub fn play_now(&mut self, cx: &mut Context<Self>, track: Track) {
+        todo!()
+    }
+
+    pub fn enqueue(&mut self, cx: &mut Context<Self>, track: Track) {
+        todo!()
+    }
+
+    pub fn next(&mut self, cx: &mut Context<Self>) {
+        todo!()
+    }
+
+    pub fn prev(&mut self, cx: &mut Context<Self>) {
+        todo!()
+    }
+
+    pub fn pause(&mut self, cx: &mut Context<Self>) {
+        todo!()
+    }
+
+    pub fn resume(&mut self, cx: &mut Context<Self>) {
+        todo!()
+    }
+
+    pub fn toggle(&mut self, cx: &mut Context<Self>) {
+        todo!()
+    }
+
+    pub fn stop(&mut self, cx: &mut Context<Self>) {
+        todo!()
+    }
+
+    pub fn set_volume(&mut self, cx: &mut Context<Self>, volume: f32) {
+        todo!()
+    }
+
+    pub fn seek(&mut self, cx: &mut Context<Self>, duration: Duration) {
+        todo!()
+    }
+
+    fn bytes_ready(&mut self, cx: &mut Context<Self>, bytes: Bytes) {
+        todo!()
     }
 
     /// Called by the shell on each tick. Events are pushed to the UI; the
     /// response carries a fetch kicked off by auto-advance.
     pub fn tick(&mut self) -> (Vec<EngineEvent>, EngineResponse) {
         match self {
-            Engine::Mock(engine) => engine.tick(),
             Engine::Real(engine) => engine.tick(),
         }
     }
 
     pub fn now_playing(&self) -> Option<NowPlaying> {
         match self {
-            Engine::Mock(engine) => engine.now_playing(),
             Engine::Real(engine) => engine.now_playing(),
         }
     }
@@ -173,7 +225,6 @@ impl Engine {
     /// [`EngineMsg`].
     pub fn queue(&self) -> std::collections::vec_deque::Iter<'_, QueueEntry> {
         match self {
-            Engine::Mock(engine) => engine.queue(),
             Engine::Real(engine) => engine.queue(),
         }
     }

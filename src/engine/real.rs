@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
+use crate::library::ManagerHandle;
+
 use super::player::AudioPlayer;
 use super::queue::{Queue, QueueEntry};
 use super::{
@@ -15,6 +17,7 @@ use super::{
 pub struct RealEngine {
     player: AudioPlayer,
     queue: Queue,
+    manager: ManagerHandle,
     /// Bytes of the current track, kept so seek-fallback / Prev-restart can
     /// re-append without another fetch.
     current_bytes: Option<Bytes>,
@@ -27,10 +30,11 @@ pub struct RealEngine {
 }
 
 impl RealEngine {
-    pub fn open() -> Self {
+    pub fn open(manager: ManagerHandle) -> Self {
         Self {
             player: AudioPlayer::open(),
             queue: Queue::new(),
+            manager,
             current_bytes: None,
             state: PlaybackState::Stopped,
             volume: 1.0,

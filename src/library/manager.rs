@@ -112,7 +112,6 @@ impl Manager {
         Self::open_at(library_configs, &data_dir, &cache_dir).await
     }
 
-    /// Test-only constructor: never touches the real user data/cache dirs.
     pub async fn open_at(
         library_configs: &[LibraryConfig],
         data_dir: &Path,

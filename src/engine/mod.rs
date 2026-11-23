@@ -16,8 +16,8 @@ pub mod real;
 
 use std::time::Duration;
 
-use crate::gui_app::RT;
 use crate::library::{ManagerHandle, TrackId};
+use crate::runtime::RT;
 
 use bytes::Bytes;
 use gpui_kit::{App, Context, Entity, EventEmitter, Global};
@@ -273,7 +273,7 @@ impl Engine {
         let manager = match self {
             Engine::Real(engine) => engine.manager().clone(),
         };
-        let rt = cx.global::<RT>().get();
+        let rt = RT::get(cx);
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         rt.spawn(async move {

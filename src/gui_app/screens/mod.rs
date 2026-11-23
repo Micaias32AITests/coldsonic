@@ -1,11 +1,9 @@
 use gpui_kit::{AnyElement, Hsla, ObjectFit, Pixels, SharedString, div, img, prelude::*};
 
 use crate::{
-    gui_app::{
-        RT,
-        cover::{Cover, CoverCache, SMALL_COVER_PX, decode},
-    },
+    gui_app::cover::{Cover, CoverCache, SMALL_COVER_PX, decode},
     library::{CoverId, ManagerHandle},
+    runtime::RT,
 };
 
 pub mod album_detail;
@@ -73,7 +71,7 @@ pub fn spawn_load_on_library<T, V>(
     V: Send + 'static,
 {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let rt = cx.global::<RT>().get();
+    let rt = RT::get(cx);
 
     rt.spawn(async move {
         let _ = tx.send(fetch.await);
@@ -137,7 +135,7 @@ pub fn ensure_cover<T: HasCovers + 'static>(
     let fetch_id = id.clone();
 
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let rt = cx.global::<RT>().get();
+    let rt = RT::get(cx);
 
     rt.spawn(async move {
         let _ = tx.send(manager.cover(&fetch_id, SMALL_COVER_PX).await);

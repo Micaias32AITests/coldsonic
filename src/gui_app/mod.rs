@@ -5,7 +5,7 @@ pub mod screens;
 use std::time::Duration;
 
 use gpui_kit::{
-    AnyElement, Entity, Global, Subscription, WindowOptions, application, assets,
+    AnyElement, Entity, Subscription, WindowOptions, application, assets,
     base::{h_flex, v_flex},
     component::{ActiveTheme, Theme, ThemeRegistry, button::Button},
     div, init, open_window,
@@ -14,15 +14,6 @@ use gpui_kit::{
 };
 
 use crate::gui_app::{
-    route::Route,
-    screens::{
-        album_detail::{AlbumDetailEvent, AlbumDetailView},
-        albums::AlbumsEvent,
-        artists::{ArtistsEvent, ArtistsView},
-        tracks::{TracksEvent, TracksView},
-    },
-};
-use crate::gui_app::{
     route::RouteView,
     screens::{
         albums::AlbumsView,
@@ -30,17 +21,18 @@ use crate::gui_app::{
     },
 };
 use crate::{config, library::Manager};
-
-#[derive(Clone)]
-pub struct RT(pub tokio::runtime::Handle);
-
-impl Global for RT {}
-
-impl RT {
-    pub fn get(&self) -> tokio::runtime::Handle {
-        self.0.clone()
-    }
-}
+use crate::{
+    gui_app::{
+        route::Route,
+        screens::{
+            album_detail::{AlbumDetailEvent, AlbumDetailView},
+            albums::AlbumsEvent,
+            artists::{ArtistsEvent, ArtistsView},
+            tracks::{TracksEvent, TracksView},
+        },
+    },
+    runtime::RT,
+};
 
 struct Coldsonic {
     routes: Vec<StackEntry>,

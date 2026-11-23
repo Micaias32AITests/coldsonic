@@ -43,6 +43,11 @@ impl RealEngine {
         }
     }
 
+    /// The library handle the entity uses to fetch track bytes.
+    pub fn manager(&self) -> &ManagerHandle {
+        &self.manager
+    }
+
     pub fn update(&mut self, msg: EngineMsg) -> EngineResponse {
         match &msg {
             EngineMsg::BytesReady { generation, result } => {

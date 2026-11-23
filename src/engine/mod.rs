@@ -1,9 +1,13 @@
 //! Player engine: the seam between the UI and playback.
 //!
-//! The engine never talks to screens directly — it emits [`EngineEvent`]s
-//! upward to its owner (`MainScreen`, the coordinator), which pushes state
-//! down to the views. Screens raise *intents* ([`EngineMsg`]) and read pushed
-//! state; they never touch audio.
+//! The engine is a GPUI entity. Screens take its handle from the
+//! [`EngineHandle`] global, call command methods (which take `&mut Context`)
+//! and either subscribe to [`EngineEvent`]s or read [`Engine::now_playing`].
+//! They never touch audio.
+//!
+//! [`EngineMsg`] is internal plumbing between the entity and the playback
+//! core (`mock`/`real`); the entity is the only thing that turns a response
+//! into an emitted event or a byte fetch.
 
 pub mod mock;
 pub mod player;
@@ -12,16 +16,20 @@ pub mod real;
 
 use std::time::Duration;
 
+use crate::gui_app::RT;
 use crate::library::{ManagerHandle, TrackId};
 
 use bytes::Bytes;
-use gpui_kit::{App, Context, Entity, Global};
+use gpui_kit::{App, Context, Entity, EventEmitter, Global};
 pub use queue::{Queue, QueueEntry, QueueEntryId};
+
+/// How often the entity ticks playback. Matches the old UI subscription.
+const TICK_INTERVAL: Duration = Duration::from_millis(250);
 
 /// What we play — the neutral track every provider hands over.
 pub type Track = crate::library::Track;
 
-/// Commands from the UI into the engine.
+/// Internal commands between the entity and the playback core.
 #[derive(Debug, Clone)]
 pub enum EngineMsg {
     /// Replace the queue, play the first track.
@@ -53,8 +61,8 @@ pub enum EngineMsg {
     },
 }
 
-/// Events the engine pushes up to its owner. `MainScreen` is the coordinator
-/// today; a player screen later.
+/// Events the engine pushes up to its owner. Screens subscribe to the entity
+/// through [`EventEmitter`] and `Context::subscribe`.
 #[derive(Debug, Clone)]
 pub enum EngineEvent {
     PlaybackStarted(Track),
@@ -68,11 +76,10 @@ pub enum EngineEvent {
     Error(String),
 }
 
-/// What the engine asks its owner to do after [`Engine::update`] or
-/// [`Engine::tick`].
+/// What the playback core asks the entity to do after an update or tick.
 ///
-/// The engine itself never touches a runtime: async work leaves as a request
-/// and comes back as an [`EngineMsg`], so the UI layer decides how to run it.
+/// The core never touches a runtime: async work leaves as a request and comes
+/// back as an [`EngineMsg`], so the entity decides how to run it.
 #[derive(Debug, Clone, Default)]
 pub enum EngineResponse {
     /// Nothing to do.
@@ -80,9 +87,8 @@ pub enum EngineResponse {
     Nothing,
     /// An event to push to the UI.
     Event(EngineEvent),
-    /// The engine needs the bytes of `id` before playback can start. The owner
-    /// fetches them and feeds `EngineMsg::BytesReady { generation, .. }` back
-    /// into [`Engine::update`].
+    /// The core needs the bytes of `id` before playback can start. The entity
+    /// fetches them and feeds `EngineMsg::BytesReady { generation, .. }` back.
     LoadTrack { generation: u64, id: TrackId },
 }
 
@@ -127,91 +133,83 @@ impl From<crate::library::LibraryError> for EngineError {
     }
 }
 
-/// The engine itself. Not `Clone`: the real variant owns a `!Send` device
-/// sink.
+/// The engine entity. Not `Clone`: the real variant owns a `!Send` device
+/// sink, which is why the engine must live on the UI thread as an entity.
 #[derive(Debug)]
 pub enum Engine {
     Real(real::RealEngine),
 }
 
+/// Global handle to the one engine entity. Views clone the `Entity` out of it;
+/// the global keeps the engine alive for the app's lifetime.
 #[derive(Clone)]
 pub struct EngineHandle(pub Entity<Engine>);
+
 impl Global for EngineHandle {}
 
 impl EngineHandle {
-    pub fn get<T>(cx: &App) -> Entity<Engine> {
+    pub fn get(cx: &App) -> Entity<Engine> {
         cx.global::<EngineHandle>().0.clone()
     }
 }
 
+impl EventEmitter<EngineEvent> for Engine {}
+
 impl Engine {
-    pub fn real(cx: &mut Context<Self>, m_handle: ManagerHandle) -> Self {
-        Self::Real(real::RealEngine::open(m_handle))
+    /// Build the engine and start its tick loop. The loop holds a weak handle,
+    /// so it stops when the entity is dropped.
+    pub fn real(cx: &mut Context<Self>, manager: ManagerHandle) -> Self {
+        Self::start_tick_loop(cx);
+        Self::Real(real::RealEngine::open(manager))
     }
 
-    /// Route a UI command into the engine. The returned [`EngineResponse`]
-    /// carries any immediate [`EngineEvent`] and any work the owner must run.
-    pub fn update(&mut self, msg: EngineMsg) -> EngineResponse {
-        match self {
-            Engine::Real(engine) => engine.update(msg),
-        }
-    }
+    // ---- commands: the public API views call -------------------------------
 
     pub fn play_queue(&mut self, cx: &mut Context<Self>, queue: Vec<Track>) {
-        todo!()
+        self.dispatch(EngineMsg::PlayQueue(queue), cx);
     }
 
     pub fn play_now(&mut self, cx: &mut Context<Self>, track: Track) {
-        todo!()
+        self.dispatch(EngineMsg::PlayNow(track), cx);
     }
 
     pub fn enqueue(&mut self, cx: &mut Context<Self>, track: Track) {
-        todo!()
+        self.dispatch(EngineMsg::Enqueue(track), cx);
     }
 
     pub fn next(&mut self, cx: &mut Context<Self>) {
-        todo!()
+        self.dispatch(EngineMsg::Next, cx);
     }
 
     pub fn prev(&mut self, cx: &mut Context<Self>) {
-        todo!()
+        self.dispatch(EngineMsg::Prev, cx);
     }
 
     pub fn pause(&mut self, cx: &mut Context<Self>) {
-        todo!()
+        self.dispatch(EngineMsg::Pause, cx);
     }
 
     pub fn resume(&mut self, cx: &mut Context<Self>) {
-        todo!()
+        self.dispatch(EngineMsg::Resume, cx);
     }
 
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
-        todo!()
+        self.dispatch(EngineMsg::Toggle, cx);
     }
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {
-        todo!()
+        self.dispatch(EngineMsg::Stop, cx);
     }
 
     pub fn set_volume(&mut self, cx: &mut Context<Self>, volume: f32) {
-        todo!()
+        self.dispatch(EngineMsg::SetVolume(volume), cx);
     }
 
     pub fn seek(&mut self, cx: &mut Context<Self>, duration: Duration) {
-        todo!()
+        self.dispatch(EngineMsg::Seek(duration), cx);
     }
 
-    fn bytes_ready(&mut self, cx: &mut Context<Self>, bytes: Bytes) {
-        todo!()
-    }
-
-    /// Called by the shell on each tick. Events are pushed to the UI; the
-    /// response carries a fetch kicked off by auto-advance.
-    pub fn tick(&mut self) -> (Vec<EngineEvent>, EngineResponse) {
-        match self {
-            Engine::Real(engine) => engine.tick(),
-        }
-    }
+    // ---- read-only state ---------------------------------------------------
 
     pub fn now_playing(&self) -> Option<NowPlaying> {
         match self {
@@ -221,11 +219,86 @@ impl Engine {
 
     /// Borrowed iteration over the upcoming queue, in playback order.
     ///
-    /// There is deliberately no mutable accessor: mutations go through
-    /// [`EngineMsg`].
+    /// There is deliberately no mutable accessor: mutations go through the
+    /// command methods.
     pub fn queue(&self) -> std::collections::vec_deque::Iter<'_, QueueEntry> {
         match self {
             Engine::Real(engine) => engine.queue(),
         }
+    }
+
+    // ---- entity plumbing ---------------------------------------------------
+
+    /// Drive playback; called by the tick loop, not by views.
+    pub fn tick(&mut self, cx: &mut Context<Self>) {
+        let (events, response) = match self {
+            Engine::Real(engine) => engine.tick(),
+        };
+        for event in events {
+            cx.emit(event);
+        }
+        self.respond(response, cx);
+    }
+
+    fn dispatch(&mut self, msg: EngineMsg, cx: &mut Context<Self>) {
+        let response = match self {
+            Engine::Real(engine) => engine.update(msg),
+        };
+        self.respond(response, cx);
+    }
+
+    /// Turn a core response into an emitted event or a byte fetch.
+    fn respond(&mut self, response: EngineResponse, cx: &mut Context<Self>) {
+        match response {
+            EngineResponse::Nothing => {}
+            EngineResponse::Event(event) => cx.emit(event),
+            EngineResponse::LoadTrack { generation, id } => {
+                self.fetch_track(generation, id, cx);
+            }
+        }
+    }
+
+    /// The fetch task's completion. Only the matching generation is applied by
+    /// the core, so a superseded load is safe.
+    fn bytes_ready(
+        &mut self,
+        cx: &mut Context<Self>,
+        generation: u64,
+        result: Result<Bytes, EngineError>,
+    ) {
+        self.dispatch(EngineMsg::BytesReady { generation, result }, cx);
+    }
+
+    fn fetch_track(&self, generation: u64, id: TrackId, cx: &mut Context<Self>) {
+        let manager = match self {
+            Engine::Real(engine) => engine.manager().clone(),
+        };
+        let rt = cx.global::<RT>().get();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        rt.spawn(async move {
+            let _ = tx.send(manager.track_bytes(&id).await);
+        });
+
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = rx.await else { return };
+            this.update(cx, |this, cx| {
+                this.bytes_ready(cx, generation, result.map_err(EngineError::from));
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn start_tick_loop(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(TICK_INTERVAL).await;
+                if this.update(cx, |this, cx| this.tick(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 }

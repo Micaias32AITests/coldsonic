@@ -26,7 +26,11 @@ pub fn image_format(bytes: &[u8]) -> ImageFormat {
 }
 
 pub fn decode(bytes: &Bytes) -> Cover {
-    Cover::Loaded(Arc::new(Image::from_bytes(image_format(bytes), bytes.to_vec())).into())
+    Cover::Loaded(decode_image(bytes))
+}
+
+pub fn decode_image(bytes: &Bytes) -> ImageSource {
+    Arc::new(Image::from_bytes(image_format(bytes), bytes.to_vec())).into()
 }
 
 #[derive(Default)]

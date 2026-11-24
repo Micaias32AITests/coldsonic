@@ -7,20 +7,25 @@ use std::time::Duration;
 use gpui_kit::{
     AnyElement, Entity, Subscription, WindowOptions, application, assets,
     base::{h_flex, v_flex},
-    component::{ActiveTheme, Theme, ThemeRegistry, button::Button},
+    component::{ActiveTheme, Theme, ThemeRegistry, button::Button, separator::Separator},
     div, init, open_window,
     prelude::*,
     px,
 };
 
-use crate::gui_app::{
-    route::RouteView,
-    screens::{
-        albums::AlbumsView,
-        artist_detail::{ArtistDetailEvent, ArtistDetailView},
+use crate::{
+    config, engine::EngineHandle, gui_app::screens::bottom_bar::BottomBar, library::Manager,
+};
+use crate::{
+    engine::Engine,
+    gui_app::{
+        route::RouteView,
+        screens::{
+            albums::AlbumsView,
+            artist_detail::{ArtistDetailEvent, ArtistDetailView},
+        },
     },
 };
-use crate::{config, library::Manager};
 use crate::{
     gui_app::{
         route::Route,
@@ -36,14 +41,17 @@ use crate::{
 
 struct Coldsonic {
     routes: Vec<StackEntry>,
+    bottom_bar: Entity<BottomBar>,
     manager: Manager,
     _runtime: tokio::runtime::Runtime,
 }
 
 impl Coldsonic {
     fn new(cx: &mut Context<Self>, rt: tokio::runtime::Runtime, manager: Manager) -> Self {
+        let bottom_bar = cx.new(|cx| BottomBar::new(cx, manager.handle()));
         let mut this = Self {
             routes: Vec::new(),
+            bottom_bar,
             manager,
             _runtime: rt,
         };
@@ -230,15 +238,22 @@ impl Render for Coldsonic {
     ) -> impl IntoElement {
         v_flex()
             .size_full()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
             .child(
                 h_flex()
-                    .size_full()
-                    .child(self.show_sidebar(cx))
-                    .child(self.show_route(cx))
-                    .child(div().w(px(320.)).h_full().bg(cx.theme().sidebar)),
+                    .flex_1()
+                    .min_h_0()
+                    .bg(cx.theme().background)
+                    .text_color(cx.theme().foreground)
+                    .child(
+                        h_flex()
+                            .size_full()
+                            .child(self.show_sidebar(cx))
+                            .child(self.show_route(cx))
+                            .child(div().w(px(320.)).h_full().bg(cx.theme().sidebar)),
+                    ),
             )
+            .child(Separator::horizontal())
+            .child(self.bottom_bar.clone())
     }
 }
 
@@ -258,6 +273,9 @@ pub fn run() {
     application().with_assets(assets::Assets).run(|cx| {
         init(cx);
         cx.set_global(RT(runtime.handle().clone()));
+        let engine = cx.new(|cx| Engine::real(cx, manager.handle()));
+        cx.set_global(EngineHandle(engine));
+
         let theme = ThemeRegistry::global(cx).default_dark_theme().clone();
         Theme::update(cx, |current| current.apply_config(&theme));
         open_window(WindowOptions::default(), cx, |_, cx| {

@@ -10,6 +10,7 @@ use gpui_kit::{
 };
 
 use crate::{
+    engine::EngineHandle,
     gui_app::{
         cover::CoverCache,
         format_duration,
@@ -64,6 +65,7 @@ impl AlbumDetailView {
     }
 
     fn header(&self, cx: &mut Context<'_, Self>, detail: &AlbumDetail) -> impl IntoElement {
+        let tracks = detail.songs.clone();
         h_flex()
             .w_full()
             .gap_4()
@@ -87,7 +89,15 @@ impl AlbumDetailView {
                         |s| format!("{s} | {n} tracks", n = detail.album.song_count),
                     ))
                     .child(div().h_8())
-                    .child(h_flex().child(Button::new("album_detail.play").child("Play"))),
+                    .child(h_flex().child(
+                        Button::new("album_detail.play").child("Play").on_click(
+                            move |_event, _window, cx| {
+                                EngineHandle::get(cx).update(cx, |engine, cx| {
+                                    engine.play_queue(cx, tracks.clone());
+                                });
+                            },
+                        ),
+                    )),
             )
     }
 }

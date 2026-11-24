@@ -47,9 +47,9 @@ impl MockEngine {
     pub fn update(&mut self, msg: EngineMsg) -> EngineResponse {
         tracing::info!(?msg, "engine msg");
         match msg {
-            EngineMsg::PlayQueue(tracks) => {
+            EngineMsg::PlayQueue(tracks, pos) => {
                 self.position = Duration::ZERO;
-                match self.queue.replace(tracks) {
+                match self.queue.replace(tracks, pos) {
                     Some(entry) => {
                         let track = entry.track.clone();
                         self.state = PlaybackState::Playing;
@@ -182,7 +182,6 @@ impl MockEngine {
             duration: track.duration,
             track,
             state: self.state,
-            volume: self.volume,
         })
     }
 

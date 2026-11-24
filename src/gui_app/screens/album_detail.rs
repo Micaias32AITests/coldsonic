@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use gpui_kit::{
-    EventEmitter, UniformListScrollHandle,
+    UniformListScrollHandle,
     base::{StyledExt, h_flex, v_flex},
     component::{ActiveTheme, button::Button},
     div,
@@ -18,7 +18,7 @@ use crate::{
             HasCovers, LoadState, cover_cell, ensure_cover, placeholder, spawn_load_on_library,
         },
     },
-    library::{AlbumDetail, AlbumId, ManagerHandle, TrackId},
+    library::{AlbumDetail, AlbumId, ManagerHandle},
 };
 
 pub struct AlbumDetailView {
@@ -27,13 +27,6 @@ pub struct AlbumDetailView {
     manager: ManagerHandle,
     scroll: UniformListScrollHandle,
 }
-
-pub enum AlbumDetailEvent {
-    Open(TrackId),
-    PlayAlbum(AlbumId),
-}
-
-impl EventEmitter<AlbumDetailEvent> for AlbumDetailView {}
 
 impl HasCovers for AlbumDetailView {
     fn covers(&mut self) -> &mut CoverCache {
@@ -89,15 +82,26 @@ impl AlbumDetailView {
                         |s| format!("{s} | {n} tracks", n = detail.album.song_count),
                     ))
                     .child(div().h_8())
-                    .child(h_flex().child(
-                        Button::new("album_detail.play").child("Play").on_click(
-                            move |_event, _window, cx| {
-                                EngineHandle::get(cx).update(cx, |engine, cx| {
-                                    engine.play_queue(cx, tracks.clone());
-                                });
-                            },
-                        ),
-                    )),
+                    .child(
+                        h_flex()
+                            .child(Button::new("album_detail.play").child("Play").on_click({
+                                let tracks = tracks.clone();
+                                move |_event, _window, cx| {
+                                    EngineHandle::get(cx).update(cx, |engine, cx| {
+                                        engine.play_queue(cx, tracks.clone(), 0);
+                                    });
+                                }
+                            }))
+                            .child(
+                                Button::new("album_detail.shuffle")
+                                    .child("Play Shuffled")
+                                    .on_click(move |_event, _window, cx| {
+                                        EngineHandle::get(cx).update(cx, |engine, cx| {
+                                            engine.play_queue_shuffled(cx, tracks.clone());
+                                        });
+                                    }),
+                            ),
+                    ),
             )
     }
 }
@@ -118,6 +122,7 @@ impl Render for AlbumDetailView {
             let manager = self.manager.clone();
             ensure_cover(&mut self.covers, manager, cx, cover_id);
         }
+
         v_flex()
             .margins(px(5.))
             .flex_1()
@@ -142,11 +147,10 @@ impl Render for AlbumDetailView {
 
                                 let track = &detail.songs[i];
                                 let name = track.title.clone();
-                                let track_id = track.id.clone();
                                 let cover_id = track.cover.clone();
 
                                 if let Some(id) = &cover_id {
-                                    ensure_cover(this.covers(), manager, cx, id);
+                                    ensure_cover(&mut this.covers, manager, cx, id);
                                 }
 
                                 let cover = cover_cell(
@@ -155,6 +159,7 @@ impl Render for AlbumDetailView {
                                     theme_muted,
                                 );
 
+                                let tracks = detail.songs.clone();
                                 h_flex()
                                     .id(("main.album.track", i))
                                     .h(px(56.))
@@ -166,7 +171,9 @@ impl Render for AlbumDetailView {
                                     .child(cover)
                                     .child(name)
                                     .on_click(cx.listener(move |_this, _, _, cx| {
-                                        cx.emit(AlbumDetailEvent::Open(track_id.clone()))
+                                        EngineHandle::get(cx).update(cx, |engine, cx| {
+                                            engine.play_queue(cx, tracks.clone(), i);
+                                        });
                                     }))
                                     .into_any_element()
                             })

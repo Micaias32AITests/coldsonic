@@ -22,6 +22,7 @@ use crate::runtime::RT;
 use bytes::Bytes;
 use gpui_kit::{App, Context, Entity, EventEmitter, Global};
 pub use queue::{Queue, QueueEntry, QueueEntryId};
+use rand::{Rng, RngExt};
 
 /// How often the entity ticks playback. Matches the old UI subscription.
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
@@ -32,8 +33,8 @@ pub type Track = crate::library::Track;
 /// Internal commands between the entity and the playback core.
 #[derive(Debug, Clone)]
 pub enum EngineMsg {
-    /// Replace the queue, play the first track.
-    PlayQueue(Vec<Track>),
+    /// Replace the queue, start at a specific track.
+    PlayQueue(Vec<Track>, usize),
     /// Play a track immediately. The current track moves to history; the
     /// upcoming queue is not modified.
     PlayNow(Track),
@@ -113,8 +114,6 @@ pub struct NowPlaying {
     pub position: Duration,
     pub duration: Duration,
     pub state: PlaybackState,
-    /// 0.0–1.0. The engine owns volume; the UI only reads the snapshot.
-    pub volume: f32,
 }
 
 /// Errors surfaced by the engine. Clone so [`EngineMsg::BytesReady`] can be
@@ -165,8 +164,13 @@ impl Engine {
 
     // ---- commands: the public API views call -------------------------------
 
-    pub fn play_queue(&mut self, cx: &mut Context<Self>, queue: Vec<Track>) {
-        self.dispatch(EngineMsg::PlayQueue(queue), cx);
+    pub fn play_queue(&mut self, cx: &mut Context<Self>, queue: Vec<Track>, start_pos: usize) {
+        self.dispatch(EngineMsg::PlayQueue(queue, start_pos), cx);
+    }
+
+    pub fn play_queue_shuffled(&mut self, cx: &mut Context<Self>, mut queue: Vec<Track>) {
+        fisher_yates(&mut queue, &mut rand::rng());
+        self.dispatch(EngineMsg::PlayQueue(queue, 0), cx);
     }
 
     pub fn play_now(&mut self, cx: &mut Context<Self>, track: Track) {
@@ -199,6 +203,12 @@ impl Engine {
 
     pub fn stop(&mut self, cx: &mut Context<Self>) {
         self.dispatch(EngineMsg::Stop, cx);
+    }
+
+    pub fn volume(&self) -> f32 {
+        match self {
+            Engine::Real(real) => real.volume(),
+        }
     }
 
     pub fn set_volume(&mut self, cx: &mut Context<Self>, volume: f32) {
@@ -300,5 +310,12 @@ impl Engine {
             }
         })
         .detach();
+    }
+}
+
+pub fn fisher_yates(queue: &mut [Track], rng: &mut impl Rng) {
+    for i in (1..queue.len()).rev() {
+        let j = rng.random_range(0..i);
+        queue.swap(i, j);
     }
 }

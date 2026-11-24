@@ -112,7 +112,7 @@ impl BottomBar {
         });
 
         let now_playing = engine.read(cx).now_playing();
-        let last_volume = now_playing.as_ref().map(|n| n.volume).unwrap_or(1.0);
+        let last_volume = engine.read(cx).volume();
 
         let mut this = Self {
             engine,
@@ -182,18 +182,19 @@ impl BottomBar {
     /// Keep the sliders in step with the engine unless the user is dragging the
     /// seek slider. Runs in `render` because `set_value` needs a `Window`.
     fn sync_sliders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (position, volume) = match &self.now_playing {
+        let position = match &self.now_playing {
             Some(now_playing) => {
                 let total = now_playing.duration.as_secs_f32();
-                let fraction = if total > 0.0 {
+
+                if total > 0.0 {
                     (now_playing.position.as_secs_f32() / total).clamp(0.0, 1.0)
                 } else {
                     0.0
-                };
-                (fraction, now_playing.volume.clamp(0.0, 1.0))
+                }
             }
-            None => (0.0, 1.0),
+            None => 0.0,
         };
+        let volume = self.engine.read(cx).volume();
 
         if self.seeking.is_none() {
             self.seek.update(cx, |state, cx| {
@@ -248,7 +249,7 @@ impl Render for BottomBar {
             ),
         };
 
-        let volume = self.now_playing.as_ref().map(|n| n.volume).unwrap_or(1.0);
+        let volume = self.engine.read(cx).volume();
         let muted = volume <= 0.0;
         let play_icon = match state {
             Some(PlaybackState::Paused) => IconName::Play,
@@ -256,117 +257,116 @@ impl Render for BottomBar {
             None => IconName::Play,
         };
 
+        // Left: cover + title/artist.
+        let left = h_flex()
+            .flex_1()
+            .flex_grow(1.0)
+            .min_w_0()
+            .max_w(px(400.))
+            .gap_2()
+            .child(cover_cell(
+                Option::from(self.current_cover.clone()).as_ref(),
+                px(COVER_DISPLAY),
+                cx.theme().muted,
+            ))
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .child(div().truncate().text_sm().child(title))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(artist),
+                    ),
+            );
+
+        // Center: transport + progress.
+        let middle = v_flex()
+            .flex_1()
+            .flex_grow(2.0)
+            .items_center()
+            .gap_1()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        self.icon_button("bottom.prev", IconName::SkipBack, cx, |engine, cx| {
+                            engine.prev(cx);
+                        }),
+                    )
+                    .child(
+                        self.icon_button("bottom.play", play_icon, cx, |engine, cx| {
+                            engine.toggle(cx);
+                        }),
+                    )
+                    .child(self.icon_button(
+                        "bottom.next",
+                        IconName::SkipForward,
+                        cx,
+                        |engine, cx| {
+                            engine.next(cx);
+                        },
+                    ))
+                    .child(
+                        self.icon_button("bottom.stop", IconName::Square, cx, |engine, cx| {
+                            engine.stop(cx);
+                        }),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_xs().child(fmt_duration(position)))
+                    .child(Slider::new(&self.seek).flex_1())
+                    .child(div().text_xs().child(fmt_duration(duration))),
+            );
+
+        // Right: mute + volume.
+        let right = h_flex()
+            .flex_1()
+            .flex_grow(1.0)
+            .min_w_0()
+            .max_w(px(400.))
+            .gap_2()
+            .justify_end()
+            .child(
+                Button::new("bottom.mute")
+                    .icon(if muted {
+                        IconName::VolumeX
+                    } else {
+                        IconName::Volume2
+                    })
+                    .ghost()
+                    .compact()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let volume = this.engine.read(cx).volume();
+                        let next = if volume <= 0.0 {
+                            this.last_volume
+                        } else {
+                            this.last_volume = volume;
+                            0.0
+                        };
+                        this.engine
+                            .update(cx, |engine, cx| engine.set_volume(cx, next));
+                    })),
+            )
+            .child(Slider::new(&self.volume).w(px(100.)));
+
         h_flex()
             .w_full()
+            .justify_between()
             .h(px(BAR_HEIGHT))
             .px(px(8.))
             .gap_3()
             .bg(cx.theme().sidebar)
             .text_color(cx.theme().foreground)
-            // Left: cover + title/artist.
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_2()
-                    .child(cover_cell(
-                        Option::from(self.current_cover.clone()).as_ref(),
-                        px(COVER_DISPLAY),
-                        cx.theme().muted,
-                    ))
-                    .child(
-                        v_flex()
-                            .min_w_0()
-                            .child(div().truncate().text_sm().child(title))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(artist),
-                            ),
-                    ),
-            )
-            // Center: transport + progress.
-            .child(
-                v_flex()
-                    .flex_1()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(self.icon_button(
-                                "bottom.prev",
-                                IconName::SkipBack,
-                                cx,
-                                |engine, cx| {
-                                    engine.prev(cx);
-                                },
-                            ))
-                            .child(
-                                self.icon_button("bottom.play", play_icon, cx, |engine, cx| {
-                                    engine.toggle(cx);
-                                }),
-                            )
-                            .child(self.icon_button(
-                                "bottom.next",
-                                IconName::SkipForward,
-                                cx,
-                                |engine, cx| {
-                                    engine.next(cx);
-                                },
-                            ))
-                            .child(self.icon_button(
-                                "bottom.stop",
-                                IconName::Square,
-                                cx,
-                                |engine, cx| {
-                                    engine.stop(cx);
-                                },
-                            )),
-                    )
-                    .child(
-                        h_flex()
-                            .w_full()
-                            .items_center()
-                            .gap_2()
-                            .child(div().text_xs().child(fmt_duration(position)))
-                            .child(Slider::new(&self.seek).flex_1())
-                            .child(div().text_xs().child(fmt_duration(duration))),
-                    ),
-            )
-            // Right: mute + volume.
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap_2()
-                    .justify_end()
-                    .child(
-                        Button::new("bottom.mute")
-                            .icon(if muted {
-                                IconName::VolumeX
-                            } else {
-                                IconName::Volume2
-                            })
-                            .ghost()
-                            .compact()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let volume =
-                                    this.now_playing.as_ref().map(|n| n.volume).unwrap_or(1.0);
-                                let next = if volume <= 0.0 {
-                                    this.last_volume
-                                } else {
-                                    this.last_volume = volume;
-                                    0.0
-                                };
-                                this.engine
-                                    .update(cx, |engine, cx| engine.set_volume(cx, next));
-                            })),
-                    )
-                    .child(Slider::new(&self.volume).w(px(100.))),
-            )
+            .child(left)
+            .child(middle)
+            .child(right)
     }
 }
 

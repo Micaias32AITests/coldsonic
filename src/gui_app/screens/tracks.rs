@@ -1,21 +1,23 @@
 use std::ops::Range;
 
 use gpui_kit::{
-    EventEmitter, UniformListScrollHandle,
+    UniformListScrollHandle,
     base::{h_flex, v_flex},
     component::ActiveTheme,
+    div,
     prelude::*,
     px, uniform_list,
 };
 
 use crate::{
+    engine::EngineHandle,
     gui_app::{
         cover::CoverCache,
         screens::{
             HasCovers, LoadState, cover_cell, ensure_cover, placeholder, spawn_load_on_library,
         },
     },
-    library::{ManagerHandle, Track, TrackId},
+    library::{ManagerHandle, Track},
 };
 
 pub struct TracksView {
@@ -24,12 +26,6 @@ pub struct TracksView {
     manager: ManagerHandle,
     scroll: UniformListScrollHandle,
 }
-
-pub enum TracksEvent {
-    Open(TrackId),
-}
-
-impl EventEmitter<TracksEvent> for TracksView {}
 
 impl HasCovers for TracksView {
     fn covers(&mut self) -> &mut CoverCache {
@@ -57,7 +53,6 @@ impl TracksView {
     }
 
     fn render_tracks(&self, cx: &mut Context<Self>, tracks: &[Track]) -> impl IntoElement {
-        let a = tracks.to_vec();
         v_flex().flex_1().h_full().min_h_0().child(
             uniform_list(
                 "main.tracks",
@@ -65,13 +60,20 @@ impl TracksView {
                 cx.processor(move |this, range: Range<usize>, _window, cx| {
                     range
                         .map(|i| {
+                            let Some(tracks) = this.tracks.loaded() else {
+                                unreachable!("calling render tracks without tracks to render");
+                            };
                             let theme = cx.theme();
                             let theme_muted = theme.muted;
+                            let theme_muted_fg = theme.muted_foreground;
                             let theme_border = theme.border;
 
-                            let track = &a[i];
+                            let track = tracks[i].clone();
                             let name = track.title.clone();
-                            let track_id = track.id.clone();
+                            let artist = track
+                                .artist
+                                .clone()
+                                .unwrap_or_else(|| "Unknown Artist".into());
                             let cover_id = track.cover.clone();
 
                             if let Some(id) = &cover_id {
@@ -93,9 +95,15 @@ impl TracksView {
                                 .border_b_1()
                                 .border_color(theme_border)
                                 .child(cover)
-                                .child(name)
+                                .child(
+                                    v_flex()
+                                        .child(name)
+                                        .child(div().text_color(theme_muted_fg).child(artist)),
+                                )
                                 .on_click(cx.listener(move |_this, _, _, cx| {
-                                    cx.emit(TracksEvent::Open(track_id.clone()))
+                                    EngineHandle::get(cx).update(cx, |engine, cx| {
+                                        engine.play_now(cx, track.clone());
+                                    })
                                 }))
                                 .into_any_element()
                         })

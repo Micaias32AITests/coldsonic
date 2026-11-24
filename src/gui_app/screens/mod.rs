@@ -11,6 +11,7 @@ pub mod albums;
 pub mod artist_detail;
 pub mod artists;
 pub mod bottom_bar;
+pub mod sidebar;
 pub mod tracks;
 
 #[derive(Default)]

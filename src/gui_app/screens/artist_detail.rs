@@ -2,8 +2,9 @@ use std::ops::Range;
 
 use gpui_kit::{
     EventEmitter, UniformListScrollHandle,
-    base::{h_flex, v_flex},
+    base::{Button, h_flex, v_flex},
     component::ActiveTheme,
+    div,
     prelude::*,
     px, uniform_list,
 };
@@ -60,6 +61,35 @@ impl ArtistDetailView {
             },
         );
     }
+
+    fn header(&self, cx: &mut Context<'_, Self>, detail: &ArtistDetail) -> impl IntoElement {
+        h_flex()
+            .w_full()
+            .gap_4()
+            .child(cover_cell(
+                detail
+                    .artist
+                    .cover
+                    .as_ref()
+                    .and_then(|c| self.covers.get(c)),
+                px(256.),
+                cx.theme().muted,
+            ))
+            .child(
+                v_flex()
+                    .child(div().text_size(px(24.)).child(detail.artist.name.clone()))
+                    .child(format!("{n} albums", n = detail.artist.album_count))
+                    .child(div().h_8())
+                    .child(
+                        h_flex().child(
+                            Button::new("artist_detail.shuffle")
+                                .child("Play Shuffled")
+                                .on_click(move |_event, _window, cx| {}),
+                        ),
+                    ),
+            )
+    }
+
     fn view_detail(&self, cx: &mut Context<Self>, detail: &ArtistDetail) -> impl IntoElement {
         v_flex().flex_1().h_full().min_h_0().child(
             uniform_list(

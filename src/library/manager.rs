@@ -395,6 +395,19 @@ impl ManagerHandle {
         self.0.artists().await
     }
 
+    pub async fn artist_tracks(&self, id: ArtistId) -> Result<Vec<Track>, LibraryError> {
+        let artist = self.0.artist(&id).await?;
+
+        let mut tracks = Vec::new();
+
+        for album in artist.albums {
+            let album_tracks = self.album(&album.id).await?.songs;
+            tracks.extend(album_tracks);
+        }
+
+        Ok(tracks)
+    }
+
     pub async fn albums(&self) -> Result<Vec<Album>, LibraryError> {
         self.0.albums().await
     }

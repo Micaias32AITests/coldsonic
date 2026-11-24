@@ -14,7 +14,10 @@ use gpui_kit::{
 };
 
 use crate::{
-    config, engine::EngineHandle, gui_app::screens::bottom_bar::BottomBar, library::Manager,
+    config,
+    engine::EngineHandle,
+    gui_app::screens::{bottom_bar::BottomBar, sidebar::RightBar},
+    library::Manager,
 };
 use crate::{
     engine::Engine,
@@ -30,10 +33,10 @@ use crate::{
     gui_app::{
         route::Route,
         screens::{
-            album_detail::{AlbumDetailEvent, AlbumDetailView},
+            album_detail::AlbumDetailView,
             albums::AlbumsEvent,
             artists::{ArtistsEvent, ArtistsView},
-            tracks::{TracksEvent, TracksView},
+            tracks::TracksView,
         },
     },
     runtime::RT,
@@ -42,6 +45,7 @@ use crate::{
 struct Coldsonic {
     routes: Vec<StackEntry>,
     bottom_bar: Entity<BottomBar>,
+    right_bar: Entity<RightBar>,
     manager: Manager,
     _runtime: tokio::runtime::Runtime,
 }
@@ -49,8 +53,10 @@ struct Coldsonic {
 impl Coldsonic {
     fn new(cx: &mut Context<Self>, rt: tokio::runtime::Runtime, manager: Manager) -> Self {
         let bottom_bar = cx.new(|cx| BottomBar::new(cx, manager.handle()));
+        let sidebar = cx.new(|cx| RightBar::new(cx, manager.handle()));
         let mut this = Self {
             routes: Vec::new(),
+            right_bar: sidebar,
             bottom_bar,
             manager,
             _runtime: rt,
@@ -128,8 +134,7 @@ impl Coldsonic {
             }
             Route::Tracks => {
                 let tracks = cx.new(|cx| TracksView::new(cx, handle));
-                let sub = cx.subscribe(&tracks, Self::handle_tracks_event);
-                (cx.new(|_cx| RouteView::Tracks(tracks)), vec![sub])
+                (cx.new(|_cx| RouteView::Tracks(tracks)), Vec::new())
             }
             Route::ArtistDetail(id) => {
                 let art_detail = cx.new(|cx| ArtistDetailView::new(cx, handle, id));
@@ -138,8 +143,7 @@ impl Coldsonic {
             }
             Route::AlbumDetail(id) => {
                 let alb_detail = cx.new(|cx| AlbumDetailView::new(cx, handle, id));
-                let sub = cx.subscribe(&alb_detail, Self::handle_album_detail_event);
-                (cx.new(|_cx| RouteView::AlbumDetail(alb_detail)), vec![sub])
+                (cx.new(|_cx| RouteView::AlbumDetail(alb_detail)), Vec::new())
             }
         }
     }
@@ -170,19 +174,6 @@ impl Coldsonic {
         }
     }
 
-    fn handle_tracks_event(
-        &mut self,
-        _tracks: Entity<TracksView>,
-        event: &TracksEvent,
-        _cx: &mut Context<'_, Coldsonic>,
-    ) {
-        match event {
-            TracksEvent::Open(id) => {
-                tracing::debug!(track = %id.as_str(), "track clicked")
-            }
-        }
-    }
-
     fn handle_artist_detail_event(
         &mut self,
         _albums: Entity<ArtistDetailView>,
@@ -192,22 +183,6 @@ impl Coldsonic {
         match event {
             ArtistDetailEvent::Open(id) => {
                 self.push_route(cx, Route::AlbumDetail(id.clone()));
-            }
-        }
-    }
-
-    fn handle_album_detail_event(
-        &mut self,
-        _albums: Entity<AlbumDetailView>,
-        event: &AlbumDetailEvent,
-        _cx: &mut Context<'_, Coldsonic>,
-    ) {
-        match event {
-            AlbumDetailEvent::Open(id) => {
-                tracing::debug!(track = %id.as_str(), "album's track clicked")
-            }
-            AlbumDetailEvent::PlayAlbum(id) => {
-                tracing::debug!(album = %id.as_str(), "play album clicked")
             }
         }
     }
@@ -249,7 +224,7 @@ impl Render for Coldsonic {
                             .size_full()
                             .child(self.show_sidebar(cx))
                             .child(self.show_route(cx))
-                            .child(div().w(px(320.)).h_full().bg(cx.theme().sidebar)),
+                            .child(self.right_bar.clone()),
                     ),
             )
             .child(Separator::horizontal())
@@ -270,7 +245,7 @@ pub fn run() {
         .block_on(Manager::open(&libraries))
         .expect("open library");
 
-    application().with_assets(assets::Assets).run(|cx| {
+    application().with_assets(assets::AllAssets).run(|cx| {
         init(cx);
         cx.set_global(RT(runtime.handle().clone()));
         let engine = cx.new(|cx| Engine::real(cx, manager.handle()));

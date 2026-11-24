@@ -61,10 +61,10 @@ impl RealEngine {
             other => tracing::info!(?other, "engine msg"),
         }
         match msg {
-            EngineMsg::PlayQueue(tracks) => {
+            EngineMsg::PlayQueue(tracks, pos) => {
                 self.player.stop();
                 self.current_bytes = None;
-                match self.queue.replace(tracks) {
+                match self.queue.replace(tracks, pos) {
                     Some(_) => return self.start_fetch(),
                     None => {
                         self.state = PlaybackState::Stopped;
@@ -201,8 +201,11 @@ impl RealEngine {
             duration: track.duration,
             track,
             state: self.state,
-            volume: self.volume,
         })
+    }
+
+    pub fn volume(&self) -> f32 {
+        self.volume
     }
 
     pub fn queue(&self) -> std::collections::vec_deque::Iter<'_, QueueEntry> {

@@ -9,7 +9,7 @@
 //! behaviours separately: [`Queue::step_back`] mutates the queue, while a
 //! restart only reads [`Queue::current`] and is handled by the engine.
 
-use std::collections::VecDeque;
+use std::{cmp::Ordering, collections::VecDeque};
 
 use super::Track;
 
@@ -50,15 +50,22 @@ impl Queue {
         Self::default()
     }
 
-    /// Replace the queue with `tracks`, clear history, and make the first
+    /// Replace the queue with `tracks`, clear history, and make the `stort_pos`
     /// track current. Returns the new current entry, if any.
-    pub fn replace(&mut self, tracks: impl IntoIterator<Item = Track>) -> Option<&QueueEntry> {
+    pub fn replace(
+        &mut self,
+        tracks: impl IntoIterator<Item = Track>,
+        start_pos: usize,
+    ) -> Option<&QueueEntry> {
         self.upcoming.clear();
         self.history.clear();
         self.current = None;
-        for track in tracks {
+        for (i, track) in tracks.into_iter().enumerate() {
             let entry = self.make_entry(track);
-            self.upcoming.push_back(entry);
+            match i.cmp(&start_pos) {
+                Ordering::Less => self.history.push_back(entry),
+                Ordering::Equal | Ordering::Greater => self.upcoming.push_back(entry),
+            }
         }
         self.advance()
     }

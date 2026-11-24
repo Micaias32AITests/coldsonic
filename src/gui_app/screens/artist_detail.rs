@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use gpui_kit::{
     EventEmitter, UniformListScrollHandle,
-    base::{Button, h_flex, v_flex},
+    base::{Button, StyledExt, h_flex, v_flex},
     component::ActiveTheme,
     div,
     prelude::*,
@@ -10,6 +10,7 @@ use gpui_kit::{
 };
 
 use crate::{
+    engine::EngineHandle,
     gui_app::{
         cover::CoverCache,
         screens::{
@@ -17,6 +18,7 @@ use crate::{
         },
     },
     library::{AlbumId, ArtistDetail, ArtistId, ManagerHandle},
+    runtime::RT,
 };
 
 pub enum ArtistDetailEvent {
@@ -63,6 +65,9 @@ impl ArtistDetailView {
     }
 
     fn header(&self, cx: &mut Context<'_, Self>, detail: &ArtistDetail) -> impl IntoElement {
+        let manager = self.manager.clone();
+        let artist_id = detail.artist.id.clone();
+
         h_flex()
             .w_full()
             .gap_4()
@@ -84,7 +89,28 @@ impl ArtistDetailView {
                         h_flex().child(
                             Button::new("artist_detail.shuffle")
                                 .child("Play Shuffled")
-                                .on_click(move |_event, _window, cx| {}),
+                                .on_click(move |_event, _window, cx| {
+                                    let manager = manager.clone();
+                                    let artist_id = artist_id.clone();
+
+                                    let (tx, rx) = tokio::sync::oneshot::channel();
+                                    RT::get(cx).spawn(async move {
+                                        let _ = tx.send(manager.artist_tracks(artist_id).await);
+                                    });
+
+                                    cx.spawn(async move |cx| {
+                                        let Ok(Ok(tracks)) = rx.await else {
+                                            return;
+                                        };
+
+                                        cx.update(|cx| {
+                                            EngineHandle::get(cx).update(cx, |engine, cx| {
+                                                engine.play_queue_shuffled(cx, tracks);
+                                            });
+                                        });
+                                    })
+                                    .detach();
+                                }),
                         ),
                     ),
             )
@@ -151,10 +177,24 @@ impl Render for ArtistDetailView {
         _window: &mut gpui_kit::Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        match &self.detail {
-            LoadState::Loaded(detail) => self.view_detail(cx, detail).into_any_element(),
-            LoadState::Failed(s) => placeholder(s),
-            LoadState::Loading => placeholder("Loading..."),
+        let detail = match &self.detail {
+            LoadState::Loaded(detail) => detail,
+            LoadState::Failed(s) => return placeholder(s),
+            LoadState::Loading => return placeholder("Loading..."),
+        };
+
+        if let Some(ref cover_id) = detail.artist.cover {
+            let manager = self.manager.clone();
+            ensure_cover(&mut self.covers, manager, cx, cover_id);
         }
+
+        v_flex()
+            .margins(px(5.))
+            .flex_1()
+            .h_full()
+            .min_h_0()
+            .child(self.header(cx, detail))
+            .child(self.view_detail(cx, detail))
+            .into_any_element()
     }
 }

@@ -196,7 +196,7 @@ mod tests {
         queue.play_now(track("old"));
         queue.enqueue(track("stale"));
 
-        queue.replace([track("a"), track("b")]);
+        queue.replace([track("a"), track("b")], 0);
 
         assert_eq!(queue.current().map(|e| e.track.title.as_str()), Some("a"));
         assert_eq!(titles(&queue), ["b"]);
@@ -206,7 +206,7 @@ mod tests {
     #[test]
     fn enqueue_appends_without_changing_current() {
         let mut queue = Queue::new();
-        queue.replace([track("a")]);
+        queue.replace([track("a")], 0);
 
         queue.enqueue(track("b"));
 
@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn play_now_changes_current_and_history_but_not_upcoming() {
         let mut queue = Queue::new();
-        queue.replace([track("a"), track("b")]);
+        queue.replace([track("a"), track("b")], 0);
 
         queue.play_now(track("c"));
 
@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn advance_moves_current_to_history() {
         let mut queue = Queue::new();
-        queue.replace([track("a"), track("b")]);
+        queue.replace([track("a"), track("b")], 0);
 
         queue.advance();
 
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn step_back_returns_current_to_upcoming_front() {
         let mut queue = Queue::new();
-        queue.replace([track("a"), track("b"), track("c")]);
+        queue.replace([track("a"), track("b"), track("c")], 0);
         queue.advance(); // a in history, b current
 
         queue.step_back();
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn step_back_without_history_is_a_no_op() {
         let mut queue = Queue::new();
-        queue.replace([track("a"), track("b")]);
+        queue.replace([track("a"), track("b")], 0);
 
         assert!(queue.step_back().is_none());
 
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn restart_path_does_not_mutate_the_queue() {
         let mut queue = Queue::new();
-        queue.replace([track("a"), track("b"), track("c")]);
+        queue.replace([track("a"), track("b"), track("c")], 0);
         queue.advance(); // b current
 
         let current = queue.current().cloned().expect("current");
@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn stop_clears_current_and_history_but_keeps_upcoming() {
         let mut queue = Queue::new();
-        queue.replace([track("a"), track("b")]);
+        queue.replace([track("a"), track("b")], 0);
         queue.advance(); // b current, a in history
         queue.enqueue(track("c"));
 
@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn duplicate_tracks_get_distinct_stable_ids() {
         let mut queue = Queue::new();
-        queue.replace([track("same"), track("same")]);
+        queue.replace([track("same"), track("same")], 0);
         let first = queue.current().expect("current").id;
         let second = queue.upcoming().next().expect("second").id;
         assert_ne!(first, second);
@@ -309,10 +309,10 @@ mod tests {
     #[test]
     fn ids_are_not_reused_after_replacing_the_queue() {
         let mut queue = Queue::new();
-        queue.replace([track("a")]);
+        queue.replace([track("a")], 0);
         let first = queue.current().expect("current").id;
 
-        queue.replace([track("b")]);
+        queue.replace([track("b")], 0);
         let second = queue.current().expect("current").id;
 
         assert_ne!(first, second);

@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn play_now_does_not_touch_upcoming() {
         let mut engine = MockEngine::new();
-        engine.update(EngineMsg::PlayQueue(vec![track("a"), track("b")]));
+        engine.update(EngineMsg::PlayQueue(vec![track("a"), track("b")], 0));
 
         engine.update(EngineMsg::PlayNow(track("c")));
 
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn enqueue_appends_and_keeps_current_playing() {
         let mut engine = MockEngine::new();
-        engine.update(EngineMsg::PlayQueue(vec![track("a")]));
+        engine.update(EngineMsg::PlayQueue(vec![track("a")], 0));
 
         engine.update(EngineMsg::Enqueue(track("b")));
 
@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn prev_steps_back_when_near_the_start() {
         let mut engine = MockEngine::new();
-        engine.update(EngineMsg::PlayQueue(vec![track("a"), track("b")]));
+        engine.update(EngineMsg::PlayQueue(vec![track("a"), track("b")], 0));
         engine.update(EngineMsg::Next);
 
         engine.update(EngineMsg::Prev);
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn prev_restarts_without_mutating_the_queue_past_the_threshold() {
         let mut engine = MockEngine::new();
-        engine.update(EngineMsg::PlayQueue(vec![track("a"), track("b")]));
+        engine.update(EngineMsg::PlayQueue(vec![track("a"), track("b")], 0));
         engine.update(EngineMsg::Next);
         let before: Vec<String> = upcoming(&engine).into_iter().map(str::to_owned).collect();
         engine.position = Duration::from_secs(10);

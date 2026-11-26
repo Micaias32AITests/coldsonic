@@ -1,14 +1,14 @@
 # The checklist
 
-- [ ] ArtistDetail shows artist's details
+- [x] ArtistDetail shows artist's details
 - [ ] Catppuccin
 - [ ] Right Bar
 - [ ] Effects
-  - [ ] Monoization
-  - [ ] slowed+reverb
-  - [ ] reverse
+  - [x] Monoization
+  - [x] speed changes
+  - [x] reverse
 - [ ] Settings menu
-- [ ] Loop all / Loop once
+- [-] Loop all / Loop once
 - [ ] Playlists
 - [ ] Keybinds
 - [ ] Navigation

@@ -8,12 +8,8 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use iced::Task;
-
-use crate::Action;
-
 use super::queue::{Queue, QueueEntry};
-use super::{EngineEvent, EngineMsg, NowPlaying, PlaybackState};
+use super::{EngineEvent, EngineMsg, EngineResponse, NowPlaying, PlaybackState};
 
 /// Fake playback speed: each 250 ms tick advances the position a second so the
 /// mock bar visibly moves.
@@ -27,7 +23,7 @@ pub struct MockEngine {
     /// Engine-owned volume (0.0–1.0), read by the bar from the snapshot.
     volume: f32,
     /// Events produced by `update` that couldn't all ride the single
-    /// `Action::Emit` in one call; drained on subsequent `tick`s.
+    /// `EngineResponse::Event` in one call; drained on subsequent `tick`s.
     pending: VecDeque<EngineEvent>,
 }
 
@@ -48,12 +44,12 @@ impl MockEngine {
         }
     }
 
-    pub fn update(&mut self, msg: EngineMsg) -> Action<EngineMsg, EngineEvent> {
+    pub fn update(&mut self, msg: EngineMsg) -> EngineResponse {
         tracing::info!(?msg, "engine msg");
         match msg {
-            EngineMsg::PlayQueue(tracks) => {
+            EngineMsg::PlayQueue(tracks, pos) => {
                 self.position = Duration::ZERO;
-                match self.queue.replace(tracks) {
+                match self.queue.replace(tracks, pos) {
                     Some(entry) => {
                         let track = entry.track.clone();
                         self.state = PlaybackState::Playing;
@@ -149,12 +145,12 @@ impl MockEngine {
                 self.position = position.min(max);
                 self.pending.push_back(EngineEvent::SeekDone);
             }
-            EngineMsg::BytesReady { .. } => {}
+            EngineMsg::TrackReady { .. } => {}
         }
         self.next_emit()
     }
 
-    pub fn tick(&mut self) -> (Vec<EngineEvent>, Task<EngineMsg>) {
+    pub fn tick(&mut self) -> (Vec<EngineEvent>, EngineResponse) {
         let mut events: Vec<EngineEvent> = self.pending.drain(..).collect();
 
         if self.state == PlaybackState::Playing {
@@ -176,7 +172,7 @@ impl MockEngine {
             }
         }
 
-        (events, Task::none())
+        (events, EngineResponse::Nothing)
     }
 
     pub fn now_playing(&self) -> Option<NowPlaying> {
@@ -186,7 +182,6 @@ impl MockEngine {
             duration: track.duration,
             track,
             state: self.state,
-            volume: self.volume,
         })
     }
 
@@ -210,11 +205,11 @@ impl MockEngine {
         }
     }
 
-    /// Pop one pending event for the single `Action::Emit` slot.
-    fn next_emit(&mut self) -> Action<EngineMsg, EngineEvent> {
+    /// Pop one pending event for the single `EngineResponse::Event` slot.
+    fn next_emit(&mut self) -> EngineResponse {
         match self.pending.pop_front() {
-            Some(event) => Action::emit(event),
-            None => Action::none(),
+            Some(event) => EngineResponse::Event(event),
+            None => EngineResponse::Nothing,
         }
     }
 }
@@ -235,6 +230,7 @@ mod tests {
             artist: None,
             album: None,
             track_no: None,
+            disc_no: None,
             duration: Duration::from_secs(60),
             cover: None,
         }
@@ -257,7 +253,7 @@ mod tests {
     #[test]
     fn play_now_does_not_touch_upcoming() {
         let mut engine = MockEngine::new();
-        engine.update(EngineMsg::PlayQueue(vec![track("a"), track("b")]));
+        engine.update(EngineMsg::PlayQueue(vec![track("a"), track("b")], 0));
 
         engine.update(EngineMsg::PlayNow(track("c")));
 
@@ -268,7 +264,7 @@ mod tests {
     #[test]
     fn enqueue_appends_and_keeps_current_playing() {
         let mut engine = MockEngine::new();
-        engine.update(EngineMsg::PlayQueue(vec![track("a")]));
+        engine.update(EngineMsg::PlayQueue(vec![track("a")], 0));
 
         engine.update(EngineMsg::Enqueue(track("b")));
 
@@ -280,7 +276,7 @@ mod tests {
     #[test]
     fn prev_steps_back_when_near_the_start() {
         let mut engine = MockEngine::new();
-        engine.update(EngineMsg::PlayQueue(vec![track("a"), track("b")]));
+        engine.update(EngineMsg::PlayQueue(vec![track("a"), track("b")], 0));
         engine.update(EngineMsg::Next);
 
         engine.update(EngineMsg::Prev);
@@ -292,7 +288,7 @@ mod tests {
     #[test]
     fn prev_restarts_without_mutating_the_queue_past_the_threshold() {
         let mut engine = MockEngine::new();
-        engine.update(EngineMsg::PlayQueue(vec![track("a"), track("b")]));
+        engine.update(EngineMsg::PlayQueue(vec![track("a"), track("b")], 0));
         engine.update(EngineMsg::Next);
         let before: Vec<String> = upcoming(&engine).into_iter().map(str::to_owned).collect();
         engine.position = Duration::from_secs(10);

@@ -437,3 +437,149 @@ async fn global_playlists_and_history_survive_dangling_libraries() {
     manager.delete_playlist(&playlist.id).await.expect("delete");
     assert!(manager.playlists().await.expect("playlists").is_empty());
 }
+
+#[tokio::test]
+async fn album_artists_and_disc_order_round_trip() {
+    use std::time::Duration;
+
+    use coldsonic::library::db::library::ScanSignature;
+    use coldsonic::library::scan::{ScanAlbum, ScanAlbumArtist, ScanArtist, ScanData, ScanTrack};
+
+    let temp = TempDir::new().expect("temp");
+    let db = LibraryDb::open(&temp.path().join("library.sqlite"))
+        .await
+        .expect("db");
+
+    let artists = vec![
+        ScanArtist {
+            id: "name:alice".into(),
+            name: "Alice".into(),
+            sort_name: Some("Alice".into()),
+            mb_artist_id: None,
+            cover: None,
+        },
+        ScanArtist {
+            id: "name:bob".into(),
+            name: "Bob".into(),
+            sort_name: Some("Bob".into()),
+            mb_artist_id: None,
+            cover: None,
+        },
+        // Track-only artist: kept for foreign keys, hidden from the API.
+        ScanArtist {
+            id: "name:carol".into(),
+            name: "Carol".into(),
+            sort_name: Some("Carol".into()),
+            mb_artist_id: None,
+            cover: None,
+        },
+    ];
+    let album_id = "album-artist:alice\u{1f}bob\0album:duets".to_string();
+    let albums = vec![ScanAlbum {
+        id: album_id.clone(),
+        name: "Duets".into(),
+        artist_id: "name:alice".into(),
+        artist: "Alice & Bob".into(),
+        album_artists: vec![
+            ScanAlbumArtist {
+                id: "name:alice".into(),
+                name: "Alice".into(),
+                sort_name: Some("Alice".into()),
+                mb_artist_id: None,
+            },
+            ScanAlbumArtist {
+                id: "name:bob".into(),
+                name: "Bob".into(),
+                sort_name: Some("Bob".into()),
+                mb_artist_id: None,
+            },
+        ],
+        album_sort_name: Some("Alice & Bob".into()),
+        compilation: false,
+        mb_release_id: None,
+        mb_release_group_id: None,
+        disc_count: Some(2),
+        song_count: 2,
+        duration: Some(Duration::from_secs(20)),
+        cover: None,
+    }];
+    let tracks = vec![
+        ScanTrack {
+            id: "disc2".into(),
+            title: "Second Disc".into(),
+            artist_id: "name:bob".into(),
+            artist: "Bob".into(),
+            album_id: album_id.clone(),
+            album: "Duets".into(),
+            track_no: Some(1),
+            disc_no: Some(2),
+            duration: Duration::from_secs(10),
+            cover: None,
+        },
+        ScanTrack {
+            id: "disc1".into(),
+            title: "First Disc".into(),
+            artist_id: "name:carol".into(),
+            artist: "Carol".into(),
+            album_id: album_id.clone(),
+            album: "Duets".into(),
+            track_no: Some(1),
+            disc_no: Some(1),
+            duration: Duration::from_secs(10),
+            cover: None,
+        },
+    ];
+    let data = ScanData {
+        artists,
+        albums,
+        tracks,
+        covers: Vec::new(),
+        files: Vec::new(),
+    };
+
+    let config = offline(
+        "Folders",
+        "folders",
+        temp.path().to_path_buf(),
+        ScanMode::Tags,
+    );
+    db.write_scan(
+        &data,
+        &temp.path().join("covers"),
+        &ScanSignature::from_config(&config),
+    )
+    .await
+    .expect("write");
+
+    // Both album artists appear with an album count; the track-only artist is
+    // hidden from the Artists screen.
+    let listed = db.artists().await.expect("artists");
+    let names: Vec<&str> = listed.iter().map(|artist| artist.name.as_str()).collect();
+    assert_eq!(names, ["Alice", "Bob"]);
+    assert!(listed.iter().all(|artist| artist.album_count == 1));
+
+    let alice_id = listed
+        .iter()
+        .find(|artist| artist.name == "Alice")
+        .expect("alice listed")
+        .id
+        .clone();
+    let alice = db.artist(&alice_id).await.expect("alice");
+    assert_eq!(alice.albums.len(), 1);
+    let bob_id = listed
+        .iter()
+        .find(|artist| artist.name == "Bob")
+        .expect("bob listed")
+        .id
+        .clone();
+    let bob = db.artist(&bob_id).await.expect("bob");
+    assert_eq!(bob.albums.len(), 1);
+
+    // Album detail orders by disc, then track.
+    let album_id = alice.albums[0].id.clone();
+    let detail = db.album(&album_id).await.expect("album");
+    let ids: Vec<&str> = detail.songs.iter().map(|track| track.id.as_str()).collect();
+    assert_eq!(ids, ["disc1", "disc2"]);
+    assert_eq!(detail.album.disc_count, Some(2));
+    assert_eq!(detail.songs[0].disc_no, Some(1));
+}

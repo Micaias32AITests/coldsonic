@@ -6,9 +6,9 @@
 //! but cannot mutate app state.
 //!
 //! The manager opens every enabled library's database eagerly. Opening is
-//! fast and performs no scanning; startup checks and scans run later as iced
-//! tasks. Ids are unprefixed inside a library database and prefixed on the way
-//! out, so routing a query back down is pure string work.
+//! fast and performs no scanning; startup checks and scans run later as
+//! background tasks. Ids are unprefixed inside a library database and prefixed
+//! on the way out, so routing a query back down is pure string work.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -112,7 +112,6 @@ impl Manager {
         Self::open_at(library_configs, &data_dir, &cache_dir).await
     }
 
-    /// Test-only constructor: never touches the real user data/cache dirs.
     pub async fn open_at(
         library_configs: &[LibraryConfig],
         data_dir: &Path,
@@ -394,6 +393,19 @@ impl ManagerHandle {
 
     pub async fn artists(&self) -> Result<Vec<Artist>, LibraryError> {
         self.0.artists().await
+    }
+
+    pub async fn artist_tracks(&self, id: ArtistId) -> Result<Vec<Track>, LibraryError> {
+        let artist = self.0.artist(&id).await?;
+
+        let mut tracks = Vec::new();
+
+        for album in artist.albums {
+            let album_tracks = self.album(&album.id).await?.songs;
+            tracks.extend(album_tracks);
+        }
+
+        Ok(tracks)
     }
 
     pub async fn albums(&self) -> Result<Vec<Album>, LibraryError> {

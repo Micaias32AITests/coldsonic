@@ -1,0 +1,22 @@
+# The checklist
+
+- [x] ArtistDetail shows artist's details
+- [ ] Catppuccin
+- [ ] Right Bar
+- [ ] Effects
+  - [x] Monoization
+  - [x] speed changes
+  - [x] reverse
+- [ ] Settings menu
+- [-] Loop all / Loop once
+- [ ] Playlists
+- [ ] Keybinds
+- [ ] Navigation
+- [ ] MPRIS
+- [ ] daemon-mode (not demon mode)
+- [ ] Opensubsonic
+- [ ] Offline Caching
+- [ ] Fullscreen Visualizer
+- [ ] Lyrics support
+- [ ] SharedString everywhere
+- [ ] Export songs ( and TRANScode them )

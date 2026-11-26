@@ -10,6 +10,7 @@
 //! a query back down is pure string work with no guessing.
 
 pub mod db;
+mod identity;
 pub mod manager;
 pub mod offline;
 pub mod scan;
@@ -48,11 +49,13 @@ id_newtype!(
     TrackId
 );
 id_newtype!(
-    /// Opaque artist id. Offline: the artist name itself.
+    /// Opaque artist id. Offline: `mb:<uuid>`, `name:<normalized-name>`, or
+    /// the stable `various-artists` id for compilations.
     ArtistId
 );
 id_newtype!(
-    /// Opaque album id. Offline: `artist\u{0}album`.
+    /// Opaque album id. Offline: the identity key from the scan priority
+    /// chain (`mb-release:<uuid>`, `album-artist:…`, `folder:…`, …).
     AlbumId
 );
 id_newtype!(
@@ -69,6 +72,8 @@ pub struct Track {
     pub artist: Option<String>,
     pub album: Option<String>,
     pub track_no: Option<u32>,
+    #[serde(default)]
+    pub disc_no: Option<u32>,
     pub duration: Duration,
     pub cover: Option<CoverId>,
 }
@@ -99,6 +104,10 @@ pub struct Album {
     pub name: String,
     pub artist: Option<String>,
     pub song_count: u32,
+    #[serde(default)]
+    pub disc_count: Option<u32>,
+    #[serde(default)]
+    pub compilation: bool,
     pub duration: Option<Duration>,
     pub cover: Option<CoverId>,
 }

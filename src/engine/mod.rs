@@ -16,10 +16,10 @@ pub mod real;
 
 use std::time::Duration;
 
+use crate::engine::player::{TrackSamples, decode_to_samples};
 use crate::library::{ManagerHandle, TrackId};
 use crate::runtime::RT;
 
-use bytes::Bytes;
 use gpui_kit::{App, Context, Entity, EventEmitter, Global};
 pub use queue::{Queue, QueueEntry, QueueEntryId};
 use rand::{Rng, RngExt};
@@ -56,9 +56,9 @@ pub enum EngineMsg {
     /// Best-effort.
     Seek(Duration),
     /// Internal: async fetch finished.
-    BytesReady {
+    TrackReady {
         generation: u64,
-        result: Result<bytes::Bytes, EngineError>,
+        result: Result<TrackSamples, EngineError>,
     },
 }
 
@@ -91,6 +91,23 @@ pub enum EngineResponse {
     /// The core needs the bytes of `id` before playback can start. The entity
     /// fetches them and feeds `EngineMsg::BytesReady { generation, .. }` back.
     LoadTrack { generation: u64, id: TrackId },
+}
+
+#[atomic_enum::atomic_enum]
+#[derive(PartialEq)]
+pub enum Monoization {
+    None = 0,
+    Mix,
+    OnlyLeft,
+    OnlyRight,
+}
+
+#[atomic_enum::atomic_enum]
+#[derive(PartialEq)]
+pub enum RepeatMode {
+    None = 0,
+    All,
+    One,
 }
 
 impl From<EngineEvent> for EngineResponse {
@@ -215,6 +232,18 @@ impl Engine {
         self.dispatch(EngineMsg::SetVolume(volume), cx);
     }
 
+    pub fn repeat(&self) -> RepeatMode {
+        match self {
+            Engine::Real(real) => real.repeat(),
+        }
+    }
+
+    pub fn set_repeat(&mut self, repeat: RepeatMode) {
+        match self {
+            Engine::Real(real) => real.set_repeat(repeat),
+        }
+    }
+
     pub fn seek(&mut self, cx: &mut Context<Self>, duration: Duration) {
         self.dispatch(EngineMsg::Seek(duration), cx);
     }
@@ -274,9 +303,9 @@ impl Engine {
         &mut self,
         cx: &mut Context<Self>,
         generation: u64,
-        result: Result<Bytes, EngineError>,
+        result: Result<TrackSamples, EngineError>,
     ) {
-        self.dispatch(EngineMsg::BytesReady { generation, result }, cx);
+        self.dispatch(EngineMsg::TrackReady { generation, result }, cx);
     }
 
     fn fetch_track(&self, generation: u64, id: TrackId, cx: &mut Context<Self>) {
@@ -292,8 +321,15 @@ impl Engine {
 
         cx.spawn(async move |this, cx| {
             let Ok(result) = rx.await else { return };
+
             this.update(cx, |this, cx| {
-                this.bytes_ready(cx, generation, result.map_err(EngineError::from));
+                this.bytes_ready(
+                    cx,
+                    generation,
+                    result
+                        .map_err(EngineError::from)
+                        .and_then(decode_to_samples),
+                );
             })
             .ok();
         })
@@ -310,6 +346,54 @@ impl Engine {
             }
         })
         .detach();
+    }
+
+    pub fn monoization(&self) -> Monoization {
+        match self {
+            Engine::Real(real) => real.monoization(),
+        }
+    }
+
+    pub fn set_monoization(&mut self, state: Monoization) {
+        match self {
+            Engine::Real(real) => real.set_monoization(state),
+        }
+    }
+
+    pub fn is_reverse(&self) -> bool {
+        match self {
+            Engine::Real(real) => real.is_reverse(),
+        }
+    }
+
+    pub fn set_reverse(&mut self, state: bool) {
+        match self {
+            Engine::Real(real) => real.set_reverse(state),
+        }
+    }
+
+    pub fn speed(&self) -> f32 {
+        match self {
+            Engine::Real(real) => real.speed(),
+        }
+    }
+
+    pub fn set_speed(&mut self, speed: f32) {
+        match self {
+            Engine::Real(real) => real.set_speed(speed),
+        }
+    }
+
+    pub fn reverb(&self) -> f32 {
+        match self {
+            Engine::Real(real) => real.reverb(),
+        }
+    }
+
+    pub fn set_reverb(&mut self, reverb: f32) {
+        match self {
+            Engine::Real(real) => real.set_reverb(reverb),
+        }
     }
 }
 

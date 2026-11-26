@@ -3,11 +3,14 @@ use std::time::Duration;
 use gpui_kit::{
     Entity, ImageSource, Subscription, Window,
     assets::IconName,
-    base::{h_flex, v_flex},
+    base::{h_flex, slider::SliderScale, v_flex},
     component::{
-        ActiveTheme,
+        ActiveTheme, WindowExt,
         button::{Button, ButtonVariants},
+        radio::RadioGroup,
+        separator::Separator,
         slider::{Slider, SliderEvent, SliderState},
+        switch::Switch,
     },
     div,
     prelude::*,
@@ -15,7 +18,10 @@ use gpui_kit::{
 };
 
 use crate::{
-    engine::{Engine, EngineEvent, EngineHandle, NowPlaying, PlaybackState, Track},
+    engine::{
+        Engine, EngineEvent, EngineHandle, Monoization, NowPlaying, PlaybackState, RepeatMode,
+        Track,
+    },
     gui_app::{
         cover::{self, SMALL_COVER_PX, decode_image},
         screens::cover_cell,
@@ -44,6 +50,10 @@ pub struct BottomBar {
     seeking: Option<f32>,
     /// Volume restored by the mute toggle.
     last_volume: f32,
+    speed_slider: Entity<SliderState>,
+    _speed_sub: Subscription,
+    reverb_slider: Entity<SliderState>,
+    _reverb_sub: Subscription,
 }
 
 #[derive(Default, Clone)]
@@ -111,6 +121,29 @@ impl BottomBar {
                 .update(cx, |engine, cx| engine.set_volume(cx, volume));
         });
 
+        let speed_slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.25)
+                .max(4.0)
+                .scale(SliderScale::Logarithmic)
+                .default_value(1.0)
+                .step(0.05)
+        });
+        let speed_sub = cx.subscribe(&speed_slider, |this, _, event: &SliderEvent, cx| {
+            let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
+            let speed = value.end().clamp(0.25, 4.0);
+            this.engine
+                .update(cx, |engine, _cx| engine.set_speed(speed));
+        });
+
+        let reverb_slider = cx.new(|_| SliderState::new().min(0.0).max(1.0).step(0.01));
+        let reverb_sub = cx.subscribe(&reverb_slider, |this, _, event: &SliderEvent, cx| {
+            let (SliderEvent::Change(value) | SliderEvent::Release(value)) = event;
+            let reverb = value.end().clamp(0.0, 1.0);
+            this.engine
+                .update(cx, |engine, _cx| engine.set_reverb(reverb));
+        });
+
         let now_playing = engine.read(cx).now_playing();
         let last_volume = engine.read(cx).volume();
 
@@ -126,6 +159,10 @@ impl BottomBar {
             now_playing,
             seeking: None,
             last_volume,
+            speed_slider,
+            _speed_sub: speed_sub,
+            reverb_slider,
+            _reverb_sub: reverb_sub,
         };
         this.load_cover(cx);
         this
@@ -209,6 +246,14 @@ impl BottomBar {
                 state.set_value(volume, window, cx);
             }
         });
+
+        self.speed_slider.update(cx, |slider, cx| {
+            slider.set_value(self.engine.read(cx).speed(), window, cx);
+        });
+
+        self.reverb_slider.update(cx, |slider, cx| {
+            slider.set_value(self.engine.read(cx).reverb(), window, cx);
+        });
     }
 
     fn icon_button(
@@ -248,6 +293,8 @@ impl Render for BottomBar {
                 None,
             ),
         };
+        let speed_slider = self.speed_slider.clone();
+        let reverb_slider = self.reverb_slider.clone();
 
         let volume = self.engine.read(cx).volume();
         let muted = volume <= 0.0;
@@ -291,6 +338,16 @@ impl Render for BottomBar {
             .child(
                 h_flex()
                     .gap_2()
+                    .child({
+                        let icon = IconName::Shuffle;
+                        Button::new("bottom.shuffle")
+                            .icon(icon)
+                            .ghost()
+                            .compact()
+                            .on_click(cx.listener(move |_this, _, _, _cx| {
+                                // TODO shuffle
+                            }))
+                    })
                     .child(
                         self.icon_button("bottom.prev", IconName::SkipBack, cx, |engine, cx| {
                             engine.prev(cx);
@@ -313,7 +370,27 @@ impl Render for BottomBar {
                         self.icon_button("bottom.stop", IconName::Square, cx, |engine, cx| {
                             engine.stop(cx);
                         }),
-                    ),
+                    )
+                    .child({
+                        let icon = match EngineHandle::get(cx).read(cx).repeat() {
+                            RepeatMode::None => IconName::RepeatOff,
+                            RepeatMode::All => IconName::Repeat,
+                            RepeatMode::One => IconName::Repeat1,
+                        };
+                        Button::new("bottom.repeat")
+                            .icon(icon)
+                            .ghost()
+                            .compact()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.engine.update(cx, |engine, _cx| {
+                                    engine.set_repeat(match engine.repeat() {
+                                        RepeatMode::None => RepeatMode::All,
+                                        RepeatMode::All => RepeatMode::One,
+                                        RepeatMode::One => RepeatMode::None,
+                                    });
+                                })
+                            }))
+                    }),
             )
             .child(
                 h_flex()
@@ -321,7 +398,14 @@ impl Render for BottomBar {
                     .items_center()
                     .gap_2()
                     .child(div().text_xs().child(fmt_duration(position)))
-                    .child(Slider::new(&self.seek).flex_1())
+                    .child({
+                        let s = Slider::new(&self.seek).flex_1();
+                        if EngineHandle::get(cx).read(cx).is_reverse() {
+                            s.reverse()
+                        } else {
+                            s
+                        }
+                    })
                     .child(div().text_xs().child(fmt_duration(duration))),
             );
 
@@ -333,6 +417,26 @@ impl Render for BottomBar {
             .max_w(px(400.))
             .gap_2()
             .justify_end()
+            .child(
+                Button::new("effects")
+                    .icon(IconName::SlidersVertical)
+                    .tooltip("Effects")
+                    .on_click({
+                        move |_event, window, cx| {
+                            let speed_slider = speed_slider.clone();
+                            let reverb_slider = reverb_slider.clone();
+                            window.open_dialog(cx, move |d, w, cx| {
+                                effects_dialog(
+                                    d,
+                                    w,
+                                    cx,
+                                    speed_slider.clone(),
+                                    reverb_slider.clone(),
+                                )
+                            });
+                        }
+                    }),
+            )
             .child(
                 Button::new("bottom.mute")
                     .icon(if muted {
@@ -374,4 +478,80 @@ impl Render for BottomBar {
 fn fmt_duration(duration: Duration) -> String {
     let secs = duration.as_secs();
     format!("{:02}:{:02}", secs / 60, secs % 60)
+}
+
+fn effects_dialog(
+    dialog: gpui_kit::component::dialog::Dialog,
+    _window: &mut Window,
+    cx: &mut gpui_kit::App,
+    speed_slider: Entity<SliderState>,
+    reverb_slider: Entity<SliderState>,
+) -> gpui_kit::component::dialog::Dialog {
+    let engine = EngineHandle::get(cx);
+    let speed = engine.read(cx).speed();
+    let reverb = engine.read(cx).reverb();
+    let reverse = engine.read(cx).is_reverse();
+    let monoization = engine.read(cx).monoization();
+    dialog
+        .title("Select Effects")
+        .w(px(512.))
+        .gap_4()
+        .child(
+            v_flex()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .child("Speed Modifier")
+                        .child(format!("{:.2}x", speed)),
+                )
+                .child(Slider::new(&speed_slider).horizontal()),
+        )
+        .child(
+            v_flex()
+                .child(
+                    h_flex()
+                        .w_full()
+                        .justify_between()
+                        .child("Reverb Modifier (WIP)")
+                        .child(format!("{:.2}x", reverb)),
+                )
+                .child(Slider::new(&reverb_slider).horizontal().disabled(true)),
+        )
+        .child(Separator::horizontal())
+        .child(
+            v_flex()
+                .child(h_flex().w_full().justify_between().child("Monoization"))
+                .child(
+                    RadioGroup::horizontal("monoization")
+                        .justify_between()
+                        .children(["Don't Monoize", "Mix Left+Right", "Only Left", "Only right"])
+                        .selected_index(Some(monoization as usize))
+                        .on_change(|index, _window, cx| {
+                            let monoization = match index {
+                                0 => Monoization::None,
+                                1 => Monoization::Mix,
+                                2 => Monoization::OnlyLeft,
+                                3 => Monoization::OnlyRight,
+                                _ => return,
+                            };
+
+                            EngineHandle::get(cx).update(cx, |engine, _cx| {
+                                engine.set_monoization(monoization);
+                            })
+                        }),
+                )
+                .child(""),
+        )
+        .child(Separator::horizontal())
+        .child(
+            Switch::new("reverse")
+                .label("Reverse")
+                .checked(reverse)
+                .on_change(|state, _window, cx| {
+                    EngineHandle::get(cx).update(cx, |engine, _cx| {
+                        engine.set_reverse(*state);
+                    })
+                }),
+        )
 }

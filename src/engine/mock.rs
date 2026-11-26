@@ -145,7 +145,7 @@ impl MockEngine {
                 self.position = position.min(max);
                 self.pending.push_back(EngineEvent::SeekDone);
             }
-            EngineMsg::BytesReady { .. } => {}
+            EngineMsg::TrackReady { .. } => {}
         }
         self.next_emit()
     }

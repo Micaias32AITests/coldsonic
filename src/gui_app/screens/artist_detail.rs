@@ -86,32 +86,30 @@ impl ArtistDetailView {
                     .child(format!("{n} albums", n = detail.artist.album_count))
                     .child(div().h_8())
                     .child(
-                        h_flex().child(
-                            Button::new("artist_detail.shuffle")
-                                .child("Play Shuffled")
-                                .on_click(move |_event, _window, cx| {
-                                    let manager = manager.clone();
-                                    let artist_id = artist_id.clone();
+                        h_flex().child(Button::new("shuffle").child("Play Shuffled").on_click(
+                            move |_event, _window, cx| {
+                                let manager = manager.clone();
+                                let artist_id = artist_id.clone();
 
-                                    let (tx, rx) = tokio::sync::oneshot::channel();
-                                    RT::get(cx).spawn(async move {
-                                        let _ = tx.send(manager.artist_tracks(artist_id).await);
-                                    });
+                                let (tx, rx) = tokio::sync::oneshot::channel();
+                                RT::get(cx).spawn(async move {
+                                    let _ = tx.send(manager.artist_tracks(artist_id).await);
+                                });
 
-                                    cx.spawn(async move |cx| {
-                                        let Ok(Ok(tracks)) = rx.await else {
-                                            return;
-                                        };
+                                cx.spawn(async move |cx| {
+                                    let Ok(Ok(tracks)) = rx.await else {
+                                        return;
+                                    };
 
-                                        cx.update(|cx| {
-                                            EngineHandle::get(cx).update(cx, |engine, cx| {
-                                                engine.play_queue_shuffled(cx, tracks);
-                                            });
+                                    cx.update(|cx| {
+                                        EngineHandle::get(cx).update(cx, |engine, cx| {
+                                            engine.play_queue_shuffled(cx, tracks);
                                         });
-                                    })
-                                    .detach();
-                                }),
-                        ),
+                                    });
+                                })
+                                .detach();
+                            },
+                        )),
                     ),
             )
     }

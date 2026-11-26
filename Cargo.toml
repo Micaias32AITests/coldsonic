@@ -7,7 +7,7 @@ edition = "2024"
 anyhow = "1.0.104"
 bytes = "1.9"
 directories = "6.0"
-gpui-kit = { version = "0.10.0", features = ["gpui-fast"] }
+gpui-kit = { version = "0.11.0", features = ["gpui-fast"] }
 lofty = "0.25"
 rand = "0.10.4"
 rodio = "0.23"
@@ -18,20 +18,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs", 
 toml = "1.1.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+symphonia = { version = "0.5.5", features = ["all"] }  # or only the formats you use
+num-traits = "0.2.19"
+atomic_float = "1.1.0"
+atomic_enum = "0.3.0"
 
 [dev-dependencies]
 tempfile = "3"
 
-[profile.dev.package]
-gpui-pre = { opt-level = 3 }
-gpui-component = { opt-level = 3 }
-gpui-kit = { opt-level = 3 }
-gpui-kit-assets = { opt-level = 3 }
-gpui-pre-platform = { opt-level = 3 }
-gpui-fast = { opt-level = 3 }
-gpui-fast-wgpu = { opt-level = 3 }
-gpui-fast-linux = { opt-level = 3 }
-gpui-fast-platform = { opt-level = 3 }
-rustybuzz = { opt-level = 3 }
-taffy = { opt-level = 3 }
-ttf-parser = { opt-level = 3 }
+[profile.dev.package."*"]
+opt-level = 3
